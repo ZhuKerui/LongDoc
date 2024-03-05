@@ -1,0 +1,3 @@
+[submodule "reference_repo/LongBench"]
+	path = reference_repo/LongBench
+	url = git@github.com:THUDM/LongBench.git
