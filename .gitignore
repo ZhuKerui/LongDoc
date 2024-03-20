@@ -163,3 +163,5 @@ cython_debug/
 # Customized
 data/
 .vscode
+*.json
+*.jsonl
