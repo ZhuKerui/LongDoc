@@ -243,7 +243,7 @@ class LongDoc:
                     temp_graph.get_edge_data(ent, other_ent)['sum'].append(sid)
         return temp_graph, summary
     
-    def _call_llm(self, prompt:str, n:int=1, temperature:float=0.8):
+    def _call_llm(self, prompt:str, n:int=1, temperature:float=0.0):
         chat_response = self.llm_server.chat.completions.create(
             model=self.llm_name,
             messages=[
@@ -285,7 +285,7 @@ class LongDoc:
     
     def identify_noun_verb(self, query:str, n:int=10):
         query_entity_prompt = f'''Question: {query}\nYou need to answer the above question based on a given story. Before reading the story, identify important and unique noun and verb phrases in the question that you want to query from the story for useful information. All the phrases must appear in the question. Don't give any explanation. Generate your response in the following format:\n"Query noun phrases:\nthe first noun phrase, the second noun phrase, ...\n\nQuery verb phrases:\nthe first verb phrase, the second verb phrase, ...".'''
-        chat_response = self._call_llm(query_entity_prompt, n=n)
+        chat_response = self._call_llm(query_entity_prompt, n=n, temperature=0.8)
         # print(chat_response.choices[0].message.content)
         noun_phrases = Counter()
         verb_phrases = Counter()
@@ -406,9 +406,9 @@ class LongDoc:
         passage_numbers = []
         for line in command.splitlines():
             line = line.strip()
-            if line.lower().startswith('thought: '):
+            if line.lower().startswith('explanation: '):
                 thought = line
-            elif line.lower().startswith('passage numbers: '):
+            elif line.lower().startswith('passage numbers: ') or line.lower().startswith('passages: '):
                 line = line.strip('.')
                 passage_numbers = [p.strip(',') for p in line.split(': ', 1)[1].strip('. ').split() if p.count('-') <= 0 and all([c.isnumeric() or c in ',-' for c in p])]
                 passage_numbers = [int(p) if '-' not in p else [int(i) for i in p.split('-')] for p in passage_numbers]
@@ -424,7 +424,8 @@ class LongDoc:
             expanded_passage_numbers.sort()
             retrieval_result = ''
             for pid in expanded_passage_numbers:
-                retrieval_result += f'''Passage {pid}:\n{doc_index.paragraphs[pid]}\n\n'''
+                if pid < len(doc_index.paragraphs):
+                    retrieval_result += f'''Passage {pid}:\n{doc_index.paragraphs[pid]}\n\n'''
             return retrieval_result
         
     def parse_decision(self, decision:str):
@@ -449,22 +450,22 @@ class LongDoc:
         if r_tool == 'index':
             # Step 1: identity entities of interest
             noun_phrases, verb_phrases = self.identify_noun_verb(query)
-            while len(noun_phrases + verb_phrases) == 0:
+            while len(noun_phrases) == 0:
                 noun_phrases, verb_phrases = self.identify_noun_verb(query)
-            self.log_info(log_file, 'entity & keyword', noun_phrases + verb_phrases)
+            self.log_info(log_file, 'entity & keyword', noun_phrases)
         
             threshold = 0.5
             k = 10
-            mention_sets = self.retrieve_node(doc_index, noun_phrases + verb_phrases, k, threshold)
+            mention_sets = self.retrieve_node(doc_index, noun_phrases, k, threshold)
             mention_sets = [list(s) for s in set([frozenset(s) for s in mention_sets])]
             self.log_info(log_file, 'mention_sets', mention_sets)
             
             # Step 2: retrieve summary/original text
             menu = self.retrieve_menu(mention_sets, doc_index, query)
             self.log_info(log_file, 'menu', menu)
-            passage_retrieve_prompt = f'''Question: {query}\n\nYou need to answer the above question based on a given story.\nBelow is a list of passages from the story with question-related entities and entity pairs contained in each passage. The passage numbers are assigned based on the original order of the passages in the text.\n\n'''
+            passage_retrieve_prompt = f'''Question: {query}\n\nYou need to answer the above question based on a given story.\nBelow is a list of passages from the story with question-related entities, entity pairs and entity summaries contained in each passage.\n\n'''
             passage_retrieve_prompt += menu
-            passage_retrieve_prompt += '''To answer the question, select 5 passages for more information. List the passage numbers for passage retrieval. Write down your thought first and then generate your choice of 5 passage numbers. Your response should use the following format:\n"Thought: Your thought and reasoning in selecting retrieval type and passage numbers.\n\nPassage numbers: first passage number, second passage number, ..., fifth passage number"'''
+            passage_retrieve_prompt += '''To answer the question, select 1-6 passages for more information. List the passage numbers for passage retrieval. Write down your choice of passage numbers first and then your explanation. Your response should use the following format:\n"Passage numbers: the first passage number, the second passage number, ...\n\nExplanation: Your thought and reasoning in selecting passage numbers."'''
 
             # passage_retrieve_prompt += '''To answer the question, select 5 passages for more information. You may list the passage numbers for single passage retrieval (e.g., "1, 3, 4" for passage 1, 3 and 4) or passage spans for continuous passages (e.g., "1-3" for passage 1, 2, and 3). Write down your thought first and then generate your choice of passage numbers. Your response should use the following format:\n"Thought: Your thought and reasoning in selecting retrieval type and passage numbers.\n\nPassage numbers: first passage number or span, second passage number or span, ..."'''
             # passage_retrieve_prompt += '''To answer the question, select 5 passages and retrieve the "original text" or "summary" of each passage for more information. You may list the passage numbers for single passage retrieval (e.g., "1, 3, 4" for passage 1, 3 and 4) or passage spans for continuous passages (e.g., "1-3" for passage 1, 2, and 3). Write down your thought first and then generate your choice of retrieval type and passage numbers. Your response should use the following format:\n"Thought: Your thought and reasoning in selecting retrieval type and passage numbers.\nRetrieval type: summary/original text\nPassage numbers: first passage number or span, second passage number or span, ..."'''
@@ -494,19 +495,19 @@ class LongDoc:
         current_summary = self._call_llm(analyze_retrieve_prompt).choices[0].message.content
         self.log_info(log_file, 'current_summary', current_summary)
         
-        # Step 4: continue searching or start answering
-        decision_prompt = f'''Question: {query}\n\nYou need to answer the above question based on a given story.\nBelow is a summary of currently retrieved information.\n\n'''
-        decision_prompt += current_summary
-        decision_prompt += '''\n\nIs the information enough for answering the question? Write down your thought first and then generate your answer. Your response should use the following format:\n"Thought: Your thought and reasoning in judging whether the information is enough.\nAnswer: Yes/No".'''
-        enough_information = None
-        fail_cnt = -1
-        while enough_information is None:
-            fail_cnt += 1
-            assert fail_cnt < 5
-            decision = self._call_llm(decision_prompt).choices[0].message.content
-            enough_information = self.parse_decision(decision)
-        self.log_info(log_file, 'decision', decision)
-        return enough_information
+        # # Step 4: continue searching or start answering
+        # decision_prompt = f'''Question: {query}\n\nYou need to answer the above question based on a given story.\nBelow is a summary of currently retrieved information.\n\n'''
+        # decision_prompt += current_summary
+        # decision_prompt += '''\n\nIs the information enough for answering the question? Write down your thought first and then generate your answer. Your response should use the following format:\n"Thought: Your thought and reasoning in judging whether the information is enough.\nAnswer: Yes/No".'''
+        # enough_information = None
+        # fail_cnt = -1
+        # while enough_information is None:
+        #     fail_cnt += 1
+        #     assert fail_cnt < 5
+        #     decision = self._call_llm(decision_prompt).choices[0].message.content
+        #     enough_information = self.parse_decision(decision)
+        # self.log_info(log_file, 'decision', decision)
+        # return enough_information
 
 
 if __name__ == '__main__':
@@ -537,7 +538,7 @@ if __name__ == '__main__':
         dataset = read_jsonline('../../data/QuALITY/QuALITY.v1.0.1.htmlstripped.train')
         process_sample = lambda sample: (sample['article'], [q['question'] for q in sample['questions']], [q['options'][q['gold_label'] - 1] for q in sample['questions']])
 
-    for task_i in range(0, 5):
+    for task_i in range(0, 10):
         
         print(f'{task_i} start')
         context, queries, answers = process_sample(dataset[task_i])
@@ -551,8 +552,8 @@ if __name__ == '__main__':
             # if qid != 4:
             #     continue
             one_time_pass = longdoc.main(query, index_file, f'{task_name}/response_{r_tool}_{task_i}_log.jsonl', r_tool)
-            if not one_time_pass:
-                print(task_name, task_i, qid)
+            # if not one_time_pass:
+            #     print(task_name, task_i, qid)
         print(f'{task_i} end')
 
         
