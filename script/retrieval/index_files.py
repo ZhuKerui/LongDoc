@@ -318,15 +318,15 @@ class LongDoc:
             ent_embed = self._embed_paragraphs([target])
             ent_embed = ent_embed / np.linalg.norm(ent_embed)
             scores:np.ndarray = node_embeds.dot(ent_embed.squeeze())
-            if scores.max() < threshold:
-                self.add_node(doc_index, target)
-                if doc_index.graph.has_node(target):
-                    ret.append([target])
-                    nodes = list(doc_index.graph.nodes)
-                    nodes.sort()
-                    node_embeds = self._embed_paragraphs(nodes)
-                    node_embeds = node_embeds / np.expand_dims(np.linalg.norm(node_embeds, axis=1), axis=1)
-                    continue
+            # if scores.max() < threshold:
+            #     self.add_node(doc_index, target)
+            #     if doc_index.graph.has_node(target):
+            #         ret.append([target])
+            #         nodes = list(doc_index.graph.nodes)
+            #         nodes.sort()
+            #         node_embeds = self._embed_paragraphs(nodes)
+            #         node_embeds = node_embeds / np.expand_dims(np.linalg.norm(node_embeds, axis=1), axis=1)
+            #         continue
             max_indices = np.argsort(scores)[::-1][:k]
             ret.append([nodes[i] for i in max_indices if scores[i] >= threshold])
         return ret
@@ -457,7 +457,7 @@ class LongDoc:
             threshold = 0.5
             k = 10
             mention_sets = self.retrieve_node(doc_index, noun_phrases, k, threshold)
-            mention_sets = [list(s) for s in set([frozenset(s) for s in mention_sets])]
+            mention_sets = [list(s) for s in set([frozenset(s) for s in mention_sets if s])]
             self.log_info(log_file, 'mention_sets', mention_sets)
             
             # Step 2: retrieve summary/original text
@@ -489,9 +489,21 @@ class LongDoc:
         # Step 3: analyze retrieved info
         # context_type = 'passages' if retrieval_type == 'original text' else 'entity summaries in passages'
         context_type = 'passages'
-        analyze_retrieve_prompt = f'''Question: {query}\n\nYou need to answer the above question based on a given story. Below are some selected {context_type}.\n\n'''
-        analyze_retrieve_prompt += retrieval_result
-        analyze_retrieve_prompt += '''Now, summarize any useful information from the above passages. Generate your response in the following format:\n"Summary: the summary of current useful information".'''
+        # analyze_retrieve_prompt = f'''Question: {query}\n\nYou need to answer the above question based on a given story. Below are some selected {context_type}.\n\n'''
+        # analyze_retrieve_prompt += retrieval_result
+        # analyze_retrieve_prompt += '''Now, summarize any useful information from the above passages. Generate your response in the following format:\n"Summary: the summary of current useful information".'''
+        
+        analyze_retrieve_prompt = '''
+Read the following passages and answer a multiple choice question.
+For example, if (C) is correct, answer with \"Answer: (C) ...\"
+
+Article:
+{}
+
+Question:
+{}
+
+'''.format(retrieval_result, query)
         current_summary = self._call_llm(analyze_retrieve_prompt).choices[0].message.content
         self.log_info(log_file, 'current_summary', current_summary)
         
@@ -533,22 +545,22 @@ if __name__ == '__main__':
     
     if task_name == 'narrativeqa':
         dataset = load_dataset('THUDM/LongBench', task_name, split='test')
-        process_sample = lambda sample: (sample['context'], [sample['input']], [sample['answers']])
+        process_sample = lambda sample: (sample['context'], [sample['input']])
     else:
         dataset = read_jsonline('../../data/QuALITY/QuALITY.v1.0.1.htmlstripped.train')
-        process_sample = lambda sample: (sample['article'], [q['question'] for q in sample['questions']], [q['options'][q['gold_label'] - 1] for q in sample['questions']])
+        process_sample = lambda sample: (sample['article'], ['\n'.join([q['question']] + [f'{c} {o}' for c, o in zip(['(A)', '(B)', '(C)', '(D)'], q['options'])]) for q in sample['questions']])
 
     for task_i in range(0, 10):
         
         print(f'{task_i} start')
-        context, queries, answers = process_sample(dataset[task_i])
+        context, queries = process_sample(dataset[task_i])
         index_file = f'{task_name}/response_{task_i}.json'
         
         if not os.path.exists(index_file):
             paragraphs, completion_labels = longdoc.doc_split.split_paragraphs(context, task_name, 400)
             write_json(index_file, longdoc.index_text(paragraphs))
         
-        for qid, (query, answer) in enumerate(zip(queries, answers)):
+        for qid, query in enumerate(queries):
             # if qid != 4:
             #     continue
             one_time_pass = longdoc.main(query, index_file, f'{task_name}/response_{r_tool}_{task_i}_log.jsonl', r_tool)
