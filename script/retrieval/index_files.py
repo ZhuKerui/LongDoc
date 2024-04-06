@@ -984,14 +984,16 @@ class LongDoc:
 
                 log_info(log_file, 'retrieval_command', query)
                 pids = longdoc._dense_retrieval(query, paragraphs, 5)
+                log_info(log_file, 'candidate_pids', pids)
                 new_retrieved_pids = []
                 for pid in pids:
                     doc_txt = paragraphs[pid]
                     score_response = self.llm_server(score_template.format(document=doc_txt, question=query))
-                    if 'yes' in score_response.lower() and pid not in retrieved_pids:
+                    if 'yes' in score_response.lower():
                         new_retrieved_pids.append(pid)
                 if new_retrieved_pids:
-                    retrieved_pids.extend(new_retrieved_pids)
+                    log_info(log_file, 'relevant_pids', new_retrieved_pids)
+                    retrieved_pids.extend([pid for pid in new_retrieved_pids if pid not in retrieved_pids])
                     retrieved_pids = retrieved_pids[-6:]
                     log_info(log_file, 'retrieved_pids', retrieved_pids)
                     context = '\n\n'.join([f'Passage {pid}:\n{paragraphs[pid]}' for pid in sorted(retrieved_pids)])
@@ -1100,7 +1102,7 @@ if __name__ == '__main__':
     longdoc = LongDoc(dataset, llm_name="mistralai/Mistral-7B-Instruct-v0.2", device='cpu')
     reading_agent = ReadingAgent(dataset)
     
-    for task_i in range(8, 10):
+    for task_i in range(0, 10):
         print(f'{task_i} start')
         
         index_file = os.path.join(dataset.data_dir, f'rel_index_{task_i}.json')
