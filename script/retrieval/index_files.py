@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, GenerationConfig, pipeline
 from typing import List, Tuple, Any, Union
 import torch
 from nltk import sent_tokenize, word_tokenize
@@ -171,42 +171,107 @@ class DocIndex:
 #         return reformated_paragraphs, completion_labels
     
 
-class LLMServer:
+class LLM:
     def __init__(self, llm_name:str="mistralai/Mistral-7B-Instruct-v0.2") -> None:
-        self.llm_name = llm_name
-        if 'gpt' in self.llm_name:
-            # self.doc_split = DocSplit("mistralai/Mistral-7B-Instruct-v0.2")
-            self.llm_server = OpenAI()
+        self.generator = pipeline("text-generation", llm_name, device_map='auto')
+        
+    def __call__(self, prompt:str | List[str], n:int=1, temperature:float=0.0) -> List[List[str]]:
+        config = GenerationConfig(
+            num_return_sequences=n, 
+            max_new_tokens=1000, 
+            do_sample=True, 
+            temperature=0.001 if temperature == 0. else temperature, 
+            pad_token_id=self.generator.tokenizer.eos_token_id, 
+            return_full_text=False)
+        
+        if isinstance(prompt, str):
+            prompt = [prompt]
+        return [
+            [
+                gen['generated_text'][-1]['content'] 
+                for gen in p_gen
+            ] 
+            for p_gen in self.generator([[{"role": "user", "content": p}] for p in prompt], generation_config=config)]
+        
+    
+class Retriever:
+    def __init__(self, retriever_name:str='facebook/contriever', device='cpu') -> None:
+        self.retriever_tokenizer = AutoTokenizer.from_pretrained(retriever_name)
+        self.retriever_model = AutoModel.from_pretrained(retriever_name)
+        if device == 'cpu':
+            self.device = None
         else:
-            # self.doc_split = DocSplit(self.llm_name)
-            
-            # Set OpenAI's API key and API base to use vLLM's API server.
-            openai_api_key = "EMPTY"
-            openai_api_base = "http://localhost:8000/v1"
-            self.llm_server = OpenAI(
-                api_key=openai_api_key,
-                base_url=openai_api_base,
-            )
+            self.device = torch.device(device)
+            self.retriever_model.cuda(device=self.device)
+        
+    @staticmethod
+    def _mean_pooling(token_embeddings:torch.Tensor, mask) -> torch.Tensor:
+        token_embeddings = token_embeddings.masked_fill(~mask[..., None].bool(), 0.)
+        sentence_embeddings:torch.Tensor  = token_embeddings.sum(dim=1) / mask.sum(dim=1)[..., None]
+        return sentence_embeddings
+    
+    def embed_paragraphs(self, paragraphs:List[str], normalize:bool=False) -> np.ndarray:
+        retriever_input = self.retriever_tokenizer.batch_encode_plus(paragraphs, padding=True, truncation=True, return_tensors='pt')
+        if self.device:
+            retriever_input = retriever_input.to(self.device)
+        with torch.no_grad():
+            retriever_output = self.retriever_model(**retriever_input)
+            paragraph_embeddings = self._mean_pooling(retriever_output[0], retriever_input['attention_mask']).cpu().numpy()
+        if normalize:
+            paragraph_embeddings = paragraph_embeddings / np.expand_dims(np.linalg.norm(paragraph_embeddings, axis=1), axis=1)
+        return paragraph_embeddings
+    
+    def dense_retrieval(self, question:str, paragraphs:Union[List[str], np.ndarray], k:int=5):
+        doc_embeds = paragraphs if isinstance(paragraphs, np.ndarray) else self.embed_paragraphs(paragraphs)
+        query_embed = self.embed_paragraphs([question])
+        scores = doc_embeds.dot(query_embed.squeeze())
+        max_indices:List[int] = np.argsort(scores)[::-1][:k].tolist()
+        return max_indices
+    
+    
+class LLMServer:
+    def __init__(self, llm:Union[str, LLM]="mistralai/Mistral-7B-Instruct-v0.2") -> None:
+        self.llm:LLM = None
+        if isinstance(llm, LLM):
+            self.llm = llm
+        else:
+            self.llm_name = llm
+            if 'gpt' in self.llm_name:
+                # self.doc_split = DocSplit("mistralai/Mistral-7B-Instruct-v0.2")
+                self.llm_server = OpenAI()
+            else:
+                # self.doc_split = DocSplit(self.llm_name)
+                
+                # Set OpenAI's API key and API base to use vLLM's API server.
+                openai_api_key = "EMPTY"
+                openai_api_base = "http://localhost:8000/v1"
+                self.llm_server = OpenAI(
+                    api_key=openai_api_key,
+                    base_url=openai_api_base,
+                )
     
     def __call__(self, prompt:str, n:int=1, temperature:float=0.0, return_str:bool=True):
-        chat_response = self.llm_server.chat.completions.create(
-            model=self.llm_name,
-            messages=[
-                {"role": "user", "content": prompt},
-            ],
-            n=n,
-            temperature=temperature,
-        )
-        return chat_response.choices[0].message.content if return_str else chat_response
+        if self.llm is None:
+            chat_response = self.llm_server.chat.completions.create(
+                model=self.llm_name,
+                messages=[
+                    {"role": "user", "content": prompt},
+                ],
+                n=n,
+                temperature=temperature,
+            )
+            return [str(chat_response.choices[i].message.content) for i in range(n)] if return_str else chat_response
+        else:
+            return self.llm(prompt, n, temperature)
 
     
 class Dataset:
-    def __init__(self, dataset_name:str, llm_name:str="mistralai/Mistral-7B-Instruct-v0.2", split:str='train') -> None:
+    def __init__(self, dataset_name:str, llm:Union[str, LLM]="mistralai/Mistral-7B-Instruct-v0.2", split:str='train') -> None:
         self.dataset_name = dataset_name
         self.answer_format = None
         self.question_type = None
         self.data = []
-        self.llm_server = LLMServer(llm_name)
+        self.llm_server = LLMServer(llm)
         self.split = split
         self.load_split()
         self.data_dir = Path(os.path.join(self.dataset_name, self.split))
@@ -289,7 +354,7 @@ class Dataset:
                 pause_point = len(paragraphs)
             else:
                 prompt = prompt_pagination_template.format(preceding, '\n'.join(passage), end_tag)
-                response = self.llm_server(prompt=prompt).strip()
+                response = self.llm_server(prompt=prompt)[0].strip()
                 pause_point = self.parse_pause_point(response)
                 if pause_point and (pause_point <= i or pause_point > j):
                     print(f"prompt:\n{prompt},\nresponse:\n{response}\n")
@@ -317,7 +382,7 @@ class Dataset:
         results = defaultdict(list)
         for r_tool in ['index', 'dpr', 'gist']:
             for task_i in range(task_start, task_end):
-                generation_file = os.path.join(self.data_dir, f'{prefix.get(r_tool, "")}generation_{r_tool}_s_{task_i}.jsonl')
+                generation_file = os.path.join(self.data_dir, f'generation_{prefix.get(r_tool, "")}{r_tool}_s_{task_i}.jsonl')
                 if os.path.exists(generation_file):
                     _, answers = self.get_questions_and_answers(self.data[task_i])
                     temp_results = []
@@ -371,8 +436,8 @@ class QualityDataset(Dataset):
 
     choices = ['(A)', '(B)', '(C)', '(D)']
     
-    def __init__(self, llm_name: str = "mistralai/Mistral-7B-Instruct-v0.2", split: str = 'train') -> None:
-        super().__init__('quality', llm_name, split)
+    def __init__(self, llm: str | LLM = "mistralai/Mistral-7B-Instruct-v0.2", split: str = 'train') -> None:
+        super().__init__('quality', llm, split)
         self.answer_format = '''If (A) is correct, answer with \"Answer: (A) ...\"\nIf (B) is correct, answer with \"Answer: (B) ...\"\nIf (C) is correct, answer with \"Answer: (C) ...\"\nIf (D) is correct, answer with \"Answer: (D) ...\"'''
         self.question_type = 'multiple choice question'
         
@@ -420,6 +485,8 @@ class QualityDataset(Dataset):
     
     def eval(self, gen: str, answer: str):
         gen = gen.strip()
+        if gen.endswith('</s>'):
+            gen = gen[:-4]
         if 'answer: ' in gen.lower():
             gen = gen.lower().split('answer: ', 1)[-1].split()[0].strip('().,:').upper()
         elif 'answer is' in gen.lower():
@@ -435,8 +502,8 @@ class QualityDataset(Dataset):
 
 class NarrativeQADataset(Dataset):
     
-    def __init__(self, llm_name: str = "mistralai/Mistral-7B-Instruct-v0.2", split: str = 'test') -> None:
-        super().__init__('narrativeqa', llm_name, split)
+    def __init__(self, llm: str | LLM = "mistralai/Mistral-7B-Instruct-v0.2", split: str = 'train') -> None:
+        super().__init__('narrativeqa', llm, split)
         self.answer_format = '''Generate your answer and explanation using the following format:\n"Answer: your answer to the question ...\nExplanation: your explanation or reasoning ...". Your answer should be brief and specific.'''
         self.question_type = 'question'
         
@@ -475,11 +542,12 @@ class NarrativeQADataset(Dataset):
                 if temp_f1 > f1:
                     f1 = temp_f1
         return pred, f1
-    
+
+
 class MuSiQueDataset(Dataset):
     
-    def __init__(self, llm_name: str = "mistralai/Mistral-7B-Instruct-v0.2", split: str = 'test') -> None:
-        super().__init__('musique', llm_name, split)
+    def __init__(self, llm: str | LLM = "mistralai/Mistral-7B-Instruct-v0.2", split: str = 'train') -> None:
+        super().__init__('musique', llm, split)
         self.answer_format = '''Generate your answer and explanation using the following format:\n"Answer: your answer to the question ...\nExplanation: your explanation or reasoning ...". Your answer should be brief and specific.'''
         self.question_type = 'question'
         
@@ -559,10 +627,11 @@ def log_info(log_file:str, tag:str, info:Any):
         with open(log_file, 'a') as f_out:
             f_out.write(json.dumps([tag, info]))
             f_out.write('\n')
-                
+    
+    
 class ReadingAgent:
-    def __init__(self, dataset:Dataset, llm_name:str="mistralai/Mistral-7B-Instruct-v0.2", model_type:str = 'gpt') -> None:
-        self.llm_server = LLMServer(llm_name)
+    def __init__(self, dataset:Dataset, llm:Union[str, LLM]="mistralai/Mistral-7B-Instruct-v0.2", model_type:str = 'gpt') -> None:
+        self.llm_server = LLMServer(llm)
         self.model_type = model_type
         self.dataset = dataset
     
@@ -574,7 +643,7 @@ class ReadingAgent:
         shortened_pages = []
         for i, page in enumerate(pages):
             prompt = prompt_shorten_template.format('\n'.join(page))
-            response = self.llm_server(prompt)
+            response = self.llm_server(prompt)[0]
             shortened_text = response.strip()
             shortened_pages.append(shortened_text)
             if verbose:
@@ -590,6 +659,17 @@ class ReadingAgent:
         return output
     
     
+    def get_page_ids(self, response:str, max_page_num:int):
+        start = response.lower().index('look up Page'.lower()) + len('look up Page')
+        page_ids_str = response[start:].split('to', 1)[0].split()
+        page_ids = []
+        for p in page_ids_str:
+            if p.strip(',.[]').isnumeric():
+                page_id = int(p.strip(',.[]'))
+                if page_id >= 0 and page_id <= max_page_num:
+                    page_ids.append(page_id)
+        return page_ids
+
     def main(self, query:str, page_file:str, gist_file:str, log_file:str=None, lookup_method:str='s'):
         pages = read_json(page_file)
         shortened_pages = read_json(gist_file)['shortened_pages']
@@ -605,18 +685,11 @@ class ReadingAgent:
             # log_info(log_file, 'lookup_prompt', prompt_lookup)
 
             page_ids = []
-            response = self.llm_server(prompt=prompt_lookup).strip()
+            response = self.llm_server(prompt=prompt_lookup)[0].strip()
             log_info(log_file, 'retrieval_command', response)
             
-            if 'I want to look up Page'.lower() in response.lower():
-                start = response.lower().index('I want to look up Page'.lower()) + len('I want to look up Page')
-                page_ids_str = response[start:].split('to', 1)[0].split()
-                page_ids = []
-                for p in page_ids_str:
-                    if p.strip(',.[]').isnumeric():
-                        page_id = int(p.strip(',.[]'))
-                        if page_id >= 0 and page_id < len(pages):
-                            page_ids.append(page_id)
+            if 'look up Page'.lower() in response.lower():
+                page_ids = self.get_page_ids(response, len(pages) - 1)
 
             # Memory expansion after look-up, replacing the target shortened page with the original page
             if len(page_ids) > 0:
@@ -628,78 +701,51 @@ class ReadingAgent:
                 menu = '\n'.join([f"<Page {i}>\n{shortened_text}" for i, shortened_text in enumerate(expanded_shortened_pages)])
                 log_info(log_file, 'menu', menu)
                 
-                prompt_lookup = prompt_sequential_lookup_template.format(menu, query, retrieved_passage_nums)
+                # prompt_lookup = prompt_sequential_lookup_template.format(menu, query, ', '.join(map(str, retrieved_passage_nums)))
+                prompt_lookup = prompt_sequential_lookup_template.format(menu, query.split('\n')[0], ', '.join(map(str, retrieved_passage_nums)))
                 # log_info(log_file, 'lookup_prompt', prompt_lookup)
                 
-                response = self.llm_server(prompt=prompt_lookup).strip()
+                response = self.llm_server(prompt=prompt_lookup)[0].strip()
                 log_info(log_file, 'retrieval_command', response)
                 
-                page_id:List[str] = re.findall(r'page \d+', response.lower())
+                # page_id:List[str] = re.findall(r'page \d+', response.lower())
                 
-                if 'STOP' in response or not page_id:
+                if 'STOP' in response or 'look up Page'.lower() not in response.lower():
                     log_info(log_file, 're-read complete', 'yes')
                     break
-                elif page_id:
+                else:
                     # Memory expansion after look-up, replacing the target shortened page with the original page
-                    page_id = int(page_id[0].split()[1])
-                    if page_id >= 0 and page_id < len(shortened_pages) and page_id not in retrieved_passage_nums:
-                        if len(retrieved_passage_nums) == 6:
-                            log_info(log_file, 're-read complete', 'no')
-                        else:
-                            expanded_shortened_pages[page_id] = '\n'.join(pages[page_id])
-                            retrieved_passage_nums.append(page_id)
-                            log_info(log_file, 'retrieved_pids', retrieved_passage_nums)
+                    if len(retrieved_passage_nums) == 6:
+                        log_info(log_file, 're-read complete', 'no')
+                    else:
+                        page_ids = self.get_page_ids(response, len(pages) - 1)
+                        new_page_id_added = False
+                        for page_id in page_ids:
+                            if page_id not in retrieved_passage_nums:
+                                expanded_shortened_pages[page_id] = '\n'.join(pages[page_id])
+                                retrieved_passage_nums.append(page_id)
+                                log_info(log_file, 'retrieved_pids', retrieved_passage_nums)
+                                new_page_id_added = True
+                                break
+                        if not new_page_id_added:
+                            log_info(log_file, 're-read complete', 'yes')
+                            break
 
         expanded_shortened_article = '\n'.join(expanded_shortened_pages)
         log_info(log_file, 'retrieval_result', expanded_shortened_article)
 
-        response = self.llm_server(prompt=prompt_answer_template.format(question_type=self.dataset.question_type, article=expanded_shortened_article, question=query, answer_format=self.dataset.answer_format))
+        response = self.llm_server(prompt=prompt_answer_template.format(question_type=self.dataset.question_type, article=expanded_shortened_article, question=query, answer_format=self.dataset.answer_format))[0]
         response = response.strip()
         log_info(log_file, 'generation', response)
     
     
 class LongDoc:
     
-    def __init__(self, dataset:Dataset, retriever_model_name:str='facebook/contriever', llm_name:str="mistralai/Mistral-7B-Instruct-v0.2", device='cpu') -> None:
+    def __init__(self, dataset:Dataset, retriever:Retriever, llm:Union[str, LLM]="mistralai/Mistral-7B-Instruct-v0.2") -> None:
         self.dataset = dataset
-        self.llm_server = LLMServer(llm_name)
-        # self.nlp = spacy.load('en_core_web_lg')#, disable=['attribute_ruler', 'lemmatizer', 'ner'])
-        # self.nlp.add_pipe('coreferee')
-        # self.nlp = spacy.load("en_core_web_lg")
-        # self.nlp.add_pipe("fastcoref", 
-        #      config={'model_architecture': 'LingMessCoref', 'model_path': 'biu-nlp/lingmess-coref', 'device': 'cuda:1', 'enable_progress_bar': False}
-        # )
-        self.retriever_tokenizer = AutoTokenizer.from_pretrained(retriever_model_name)
-        self.retriever_model = AutoModel.from_pretrained(retriever_model_name)
-        if device == 'cpu':
-            self.device = None
-        else:
-            self.device = torch.device(device)
-            self.retriever_model.cuda(device=self.device)
-        
-    # Mean pooling
-    @staticmethod
-    def _mean_pooling(token_embeddings:torch.Tensor, mask) -> torch.Tensor:
-        token_embeddings = token_embeddings.masked_fill(~mask[..., None].bool(), 0.)
-        sentence_embeddings:torch.Tensor  = token_embeddings.sum(dim=1) / mask.sum(dim=1)[..., None]
-        return sentence_embeddings
-    
-    def _embed_paragraphs(self, paragraphs:List[str]) -> np.ndarray:
-        retriever_input = self.retriever_tokenizer.batch_encode_plus(paragraphs, padding=True, truncation=True, return_tensors='pt')
-        if self.device:
-            retriever_input = retriever_input.to(self.device)
-        with torch.no_grad():
-            retriever_output = self.retriever_model(**retriever_input)
-            paragraph_embeddings = self._mean_pooling(retriever_output[0], retriever_input['attention_mask']).cpu().numpy()
-        return paragraph_embeddings
-    
-    def _dense_retrieval(self, question:str, paragraphs:Union[List[str], np.ndarray], k:int=5):
-        doc_embeds = paragraphs if isinstance(paragraphs, np.ndarray) else self._embed_paragraphs(paragraphs)
-        query_embed = self._embed_paragraphs([question])
-        scores = doc_embeds.dot(query_embed.squeeze())
-        max_indices:List[int] = np.argsort(scores)[::-1][:k].tolist()
-        return max_indices
-    
+        self.llm_server = LLMServer(llm)
+        self.retriever = retriever
+
     def _parse_to_graph(self, response:str):
         start_ents = False
         start_summary = False
@@ -748,7 +794,7 @@ class LongDoc:
         for paragraph in paragraphs:
             # list_entity_prompt = f'''{context_type.upper()}:\n\n{paragraph}\n\nAbove is part of a {context_type}. First, list the important entities in the above passages that are relevant to most of the content. You may synthesis entities to avoid ambiguity. Don't give any explanation. Then, summarize the information in the above context for each of the important entities and try to include other important entities in each entity's summary if they are related. The two steps should be generated in the following format: "Important entities:\n1. Entity 1\n2. Entity 2\n...\nEntity summary:\n1. Entity 1: summary of Entity 1\n2. Entity 2: summary of Entity 2\n..."'''
             list_entity_prompt = f'''{context_type.upper()}:\n\n{paragraph}\n\nAbove is part of a {context_type}. First, list the important named entities in the above passages that are relevant to most of the content. You may synthesis entities to avoid ambiguity. Don't give any explanation. Then, find the closely related important entity clusters and use 1 to 3 sentences to informatively summarize their relational information in the above context. The two steps should be generated in the following format: "Important entities:\n1. Entity 1\n2. Entity 2\n...\n\nRelation summary:\n1. (Entity 1, Entity 2, Entity 3): summary of relational information between Entity 1, 2 and 3.\n2. (Entity 2, Entity 4): summary of relational information between Entity 2 and 4.\n..."'''
-            chat_response = self.llm_server(list_entity_prompt)
+            chat_response = self.llm_server(list_entity_prompt)[0]
             results.append((paragraph, chat_response))
         return results
     
@@ -774,17 +820,17 @@ class LongDoc:
             #     all_graph.get_edge_data(head, tail)['sum'].extend([(sid + s_offset, pid) for sid in sids])
             all_graph.add_edges_from(temp_graph.edges)
             all_summary.extend(temp_summary)
-        return DocIndex(all_graph, paragraphs, all_summary, self._embed_paragraphs(paragraphs), pid2nodes)
+        return DocIndex(all_graph, paragraphs, all_summary, self.retriever.embed_paragraphs(paragraphs), pid2nodes)
     
     def identify_noun_verb(self, query:str, n:int=10):
         query_entity_prompt = f'''Question: {query}\nYou need to answer the above question based on a given story. Before reading the story, identify important and unique noun and verb phrases in the question that you want to query from the story for useful information. All the phrases must appear in the question. Don't give any explanation. Generate your response in the following format:\n"Query noun phrases:\nthe first noun phrase, the second noun phrase, ...\n\nQuery verb phrases:\nthe first verb phrase, the second verb phrase, ...".'''
-        chat_response = self.llm_server(query_entity_prompt, n=n, temperature=0.8, return_str=False)
+        chat_response = self.llm_server(query_entity_prompt, n=n, temperature=0.8)
         noun_phrases = Counter()
         verb_phrases = Counter()
         is_noun = False
         is_verb = False
-        for choice in chat_response.choices:
-            for line in choice.message.content.splitlines():
+        for choice in chat_response:
+            for line in choice.splitlines():
                 line = line.strip(' .')
                 if line:
                     if line.lower() == 'query noun phrases:':
@@ -804,11 +850,9 @@ class LongDoc:
         nodes = list(doc_index.graph.nodes)
         nodes.sort()
         ret:List[List[str]] = []
-        node_embeds = self._embed_paragraphs(nodes)
-        node_embeds = node_embeds / np.expand_dims(np.linalg.norm(node_embeds, axis=1), axis=1)
+        node_embeds = self.retriever.embed_paragraphs(nodes, normalize=True)
         for target in targets:
-            ent_embed = self._embed_paragraphs([target])
-            ent_embed = ent_embed / np.linalg.norm(ent_embed)
+            ent_embed = self.retriever.embed_paragraphs([target], normalize=True)
             scores:np.ndarray = node_embeds.dot(ent_embed.squeeze())
             # if scores.max() < threshold:
             #     self.add_node(doc_index, target)
@@ -816,18 +860,17 @@ class LongDoc:
             #         ret.append([target])
             #         nodes = list(doc_index.graph.nodes)
             #         nodes.sort()
-            #         node_embeds = self._embed_paragraphs(nodes)
-            #         node_embeds = node_embeds / np.expand_dims(np.linalg.norm(node_embeds, axis=1), axis=1)
+            #         node_embeds = self.retriever.embed_paragraphs(nodes, normalize=True)
             #         continue
             max_indices = np.argsort(scores)[::-1][:k]
             ret.append([nodes[i] for i in max_indices if scores[i] >= threshold] + [target])
         return ret
 
     def add_node(self, doc_index:DocIndex, node:str):
-        pids = self._dense_retrieval(node, doc_index.paragraph_embs, 10)
+        pids = self.retriever.dense_retrieval(node, doc_index.paragraph_embs, 10)
         for pid in pids:
             important_ents = "\n".join(doc_index.pid2nodes[pid])
-            response = self.llm_server(f'''Context:\n{doc_index.paragraphs[pid]}\n\nImportant entities:\n{important_ents}\n\nDoes the above context contain information about "{node}"? If yes, summarize the information in the above context for "{node}" and try to include other important entities in the summary if they are related. If no, simply reply "No". Generate your response in the following format: "Answer: summary of {node} or 'No.'"''')
+            response = self.llm_server(f'''Context:\n{doc_index.paragraphs[pid]}\n\nImportant entities:\n{important_ents}\n\nDoes the above context contain information about "{node}"? If yes, summarize the information in the above context for "{node}" and try to include other important entities in the summary if they are related. If no, simply reply "No". Generate your response in the following format: "Answer: summary of {node} or 'No.'"''')[0]
             response = response.strip()
             if response.lower().startswith('answer: '):
                 if response.lower().startswith('answer: no'):
@@ -941,20 +984,20 @@ class LongDoc:
             passage_retrieve_prompt += menu
             passage_retrieve_prompt += '''To answer the question, select 5 passages to retrieve passages from the original story for complete context. List the 5 passage numbers for passage retrieval. Write down your choice of passage numbers first and then your explanation. Your response should use the following format:\n"Passage numbers: the first passage number, the second passage number, ...\n\nExplanation: Your thought and reasoning in selecting passage numbers."\nDO NOT select more passages if you don't need to. DO NOT answer the question yet.'''
 
-            retrieval_command = self.llm_server(passage_retrieve_prompt)
+            retrieval_command = self.llm_server(passage_retrieve_prompt)[0]
             log_info(log_file, 'retrieval_command', retrieval_command)
             pids = self.retrieval_passage(retrieval_command, doc_index)
             assert pids
             
         elif r_tool == 'dpr':
-            pids = self._dense_retrieval(query, doc_index.paragraphs, 5)
+            pids = self.retriever.dense_retrieval(query, doc_index.paragraphs, 5)
             pids.sort()
         
         retrieval_result = ''.join([f'''Passage {pid}:\n{doc_index.paragraphs[pid]}\n\n''' for pid in pids])
         log_info(log_file, 'retrieval_result', retrieval_result)
         
         # Step 3: analyze retrieved info
-        generation = self.llm_server(prompt_answer_template.format(question_type=self.dataset.question_type, article=retrieval_result, question=query, answer_format=self.dataset.answer_format))
+        generation = self.llm_server(prompt_answer_template.format(question_type=self.dataset.question_type, article=retrieval_result, question=query, answer_format=self.dataset.answer_format))[0]
         log_info(log_file, 'generation', generation)
         
 
@@ -964,13 +1007,14 @@ class LongDoc:
         context = ''
         generation = ''
         retrieved_pids = []
-        query = init_question
-        log_info(log_file, 'query', query)
+        log_info(log_file, 'query', init_question)
+        init_query = init_question.split('\n')[0]
+        query = init_query
         repeat = 0
         step = 1
         while True:
             if step >= 6:
-                generation = self.llm_server(prompt_answer_template.format(question_type=dataset.question_type, article=context, question=init_question, answer_format=dataset.answer_format))
+                generation = self.llm_server(prompt_answer_template.format(question_type=dataset.question_type, article=context, question=init_question, answer_format=dataset.answer_format))[0]
                 log_info(log_file, 'generation', generation)
                 break
             if state == 'retrieve':
@@ -983,12 +1027,12 @@ class LongDoc:
                 DO NOT answer the question yet."""
 
                 log_info(log_file, 'retrieval_command', query)
-                pids = longdoc._dense_retrieval(query, paragraphs, 5)
+                pids = longdoc.retriever.dense_retrieval(query, paragraphs, 5)
                 log_info(log_file, 'candidate_pids', pids)
                 new_retrieved_pids = []
                 for pid in pids:
                     doc_txt = paragraphs[pid]
-                    score_response = self.llm_server(score_template.format(document=doc_txt, question=query))
+                    score_response = self.llm_server(score_template.format(document=doc_txt, question=query))[0]
                     if 'yes' in score_response.lower():
                         new_retrieved_pids.append(pid)
                 if new_retrieved_pids:
@@ -1017,7 +1061,7 @@ class LongDoc:
                 Generate a statement to summarize useful information in the article to the question.
                 DO NOT answer the question yet.
                 '''
-                generation = self.llm_server(prompt_summarize_template.format(article=context, question=init_question), temperature=0.7)
+                generation = self.llm_server(prompt_summarize_template.format(article=context, question=init_query), temperature=0.7)[0]
                 log_info(log_file, 'temp_generation', generation)
                 
                 ### Hallucination Grader 
@@ -1030,7 +1074,7 @@ class LongDoc:
                 Give a binary score 'yes' or 'no' score to indicate whether the statement is grounded in / supported by a set of facts. \n
                 Provide the binary score as a JSON with a single key 'score' and no preamble or explanation."""
 
-                hallucination_response = self.llm_server(hallucination_template.format(documents=context, generation=generation))
+                hallucination_response = self.llm_server(hallucination_template.format(documents=context, generation=generation))[0]
                 log_info(log_file, 'hallucination_response', hallucination_response)
                 
                 if 'yes' in hallucination_response.lower() or repeat >= 5:
@@ -1047,10 +1091,10 @@ class LongDoc:
                     Give a binary score 'yes' or 'no' to indicate whether the statement contains adequate information to resolve a question. \n
                     Provide the binary score as a JSON with a single key 'score' and no preamble or explanation."""
 
-                    answer_grade_response = self.llm_server(answer_grade_template.format(question=init_question, generation=generation))
+                    answer_grade_response = self.llm_server(answer_grade_template.format(question=init_query, generation=generation))[0]
                     log_info(log_file, 'answer_grade_response', answer_grade_response)
                     if 'yes' in answer_grade_response.lower():
-                        generation = self.llm_server(prompt_answer_template.format(question_type=dataset.question_type, article=context, question=init_question, answer_format=dataset.answer_format))
+                        generation = self.llm_server(prompt_answer_template.format(question_type=dataset.question_type, article=context, question=init_question, answer_format=dataset.answer_format))[0]
                         log_info(log_file, 'generation', generation)
                         break
                     else:
@@ -1068,7 +1112,7 @@ class LongDoc:
                 Here is the current response: \n\n {generation} \n\n
                 Improved question with no preamble: \n """
 
-                re_write_response = self.llm_server(re_write_template.format(question=init_question, query=query, generation=generation))
+                re_write_response = self.llm_server(re_write_template.format(question=init_query, query=query, generation=generation))[0]
                 query = re_write_response
                 state = 'retrieve'
                 step += 1
@@ -1092,15 +1136,19 @@ if __name__ == '__main__':
     r_tool = args.r_tool
     reasoning_style = args.reasoning_style
     
+    llm = LLM()
+    retriever = Retriever()
+    # llm = 'mistralai/Mistral-7B-Instruct-v0.2'
+    
     if task_name == 'narrativeqa':
-        dataset = NarrativeQADataset()
+        dataset = NarrativeQADataset(llm)
     elif task_name == 'musique':
-        dataset = MuSiQueDataset()
+        dataset = MuSiQueDataset(llm)
     else:
-        dataset = QualityDataset("mistralai/Mistral-7B-Instruct-v0.2", 'dev')
+        dataset = QualityDataset(llm, 'dev')
         
-    longdoc = LongDoc(dataset, llm_name="mistralai/Mistral-7B-Instruct-v0.2", device='cpu')
-    reading_agent = ReadingAgent(dataset)
+    longdoc = LongDoc(dataset, retriever, llm)
+    reading_agent = ReadingAgent(dataset, llm)
     
     for task_i in range(0, 10):
         print(f'{task_i} start')
@@ -1108,7 +1156,7 @@ if __name__ == '__main__':
         index_file = os.path.join(dataset.data_dir, f'rel_index_{task_i}.json')
         page_file = os.path.join(dataset.data_dir, f'pages_{task_i}.json')
         gist_file = os.path.join(dataset.data_dir, f'gist_{task_i}.json')
-        log_file = os.path.join(dataset.data_dir, f'generation_{r_tool}_{reasoning_style}_{task_i}.jsonl')
+        log_file = os.path.join(dataset.data_dir, f'generation_wo_c_{r_tool}_{reasoning_style}_{task_i}.jsonl')
         questions, _ = dataset.get_questions_and_answers(dataset.data[task_i])
         for qid, query in enumerate(questions):
             if r_tool == 'gist':
