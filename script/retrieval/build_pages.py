@@ -3,19 +3,20 @@ import time, datetime, json, os
 from tqdm import tqdm
 from collections import defaultdict
 
-from index_files import LongDoc, write_json, QualityDataset, NarrativeQADataset, LooGlEDataset, MuSiQueDataset, ReadingAgent, read_json, read_jsonline, LLMServer
+from index_files import LongDoc, write_json, QualityDataset, NarrativeQADataset, LooGlEDataset, MuSiQueDataset, ReadingAgent, read_json, read_jsonline, LLMServer, Retriever
 
 llm_server = LLMServer()
+retriever = Retriever()
 
-# dataset = NarrativeQADataset()
+dataset = NarrativeQADataset()
 # dataset = LooGlEDataset()
 # dataset = QualityDataset(split='dev')
-dataset = MuSiQueDataset()
+# dataset = MuSiQueDataset()
 reading_agent = ReadingAgent(dataset)
-longdoc = LongDoc(dataset, device='cpu')
+longdoc = LongDoc(dataset, retriever)
 
 start = 0
-end = 20
+end = 40
 
 import sys
 
