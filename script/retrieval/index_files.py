@@ -1,5 +1,5 @@
-from transformers import AutoTokenizer, AutoModel, GenerationConfig, pipeline
-from typing import List, Tuple, Any, Union
+from transformers import AutoTokenizer, AutoModel, GenerationConfig, pipeline, BatchEncoding, AutoModelForCausalLM
+from typing import List, Tuple, Any, Union, Dict, cast
 import torch
 from nltk import sent_tokenize, word_tokenize
 from pathlib import Path
@@ -58,7 +58,24 @@ class DocIndex:
         self.pid2nodes = pid2nodes
         self.bm25 = BM25Okapi([[w.lower() for w in word_tokenize(p)] for p in paragraphs])
     
-    
+
+class ChunkInfo:
+    def __init__(self, passage:str, summary:str, important_ents:List[str]=None, ent_descriptions:Dict[str, str]=None, relation_descriptions:List[Tuple[List[str], str]]=None) -> None:
+        self.passage = passage
+        self.summary = summary
+        self.important_ents = important_ents
+        self.ent_descriptions = ent_descriptions
+        self.relation_descriptions = relation_descriptions
+        
+    def to_json(self):
+        return {
+            'passage': self.passage,
+            'summary': self.summary,
+            'important_ents': self.important_ents,
+            'ent_descriptions': self.ent_descriptions,
+            'relation_descriptions': self.relation_descriptions
+        }
+        
 # class DocSplit:
 #     def split_trec(text:str):
 #         lines = text.splitlines()
@@ -170,10 +187,226 @@ class DocIndex:
 #             completion_labels.append(True)
 #         return reformated_paragraphs, completion_labels
     
+    
+class GritLM(torch.nn.Module):
+    def __init__(
+        self,
+        model_name_or_path: str = None,
+        mode: str = 'unified', # One of ['unified', 'embedding', 'generative']        
+        pooling_method: str = 'mean', # One of ['cls', 'lasttoken', 'mean', 'weightedmean']
+        normalized: bool = True,
+        projection: int = None,
+        is_inference: bool = True,
+        embed_eos: str = "",
+        attn: str = 'bbcc',
+        **kwargs, # Passed to the model, e.g. `attn_implementation`, `torch_dtype` etc.
+    ) -> None:
+        super().__init__()
+        if mode == 'embedding':
+            if any([x in model_name_or_path for x in ['gtr', 't5', 'instructor']]):
+                # Somehow AutoModel does not pick the right one by default
+                from transformers import T5EncoderModel
+                self.model = T5EncoderModel.from_pretrained(model_name_or_path, **kwargs)
+            else:
+                self.model = AutoModel.from_pretrained(model_name_or_path, trust_remote_code=True, **kwargs)
+            self.embedding_attr = None
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(model_name_or_path, trust_remote_code=True, **kwargs)
+            self.generate = self.model.generate
+
+            if hasattr(self.model, 'model'): # LLama2 & Mistral
+                self.embedding_attr = 'model'
+            elif hasattr(self.model, 'transformer'): # GPT-Neo & GPT-J
+                self.embedding_attr = 'transformer'
+            else: 
+                raise ValueError("Could not find attribute to use for embedding: ", self.model)
+
+        self.projection = torch.nn.Linear(
+            in_features=self.model.config.hidden_size, 
+            out_features=int(projection),
+            dtype=self.model.dtype
+        ) if projection is not None else None
+        self.normalized = normalized
+        self.pooling_method = pooling_method
+
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.num_gpus = 1
+        self.embed_eos = embed_eos
+        self.attn = attn
+        if (self.attn is not None) and self.attn not in ['bbcc', 'cccc', 'bb', 'cc']:
+            raise ValueError(f"Mixed attention no longer supported: {self.attn}. Only bbcc, cccc, bb, cc are supported")
+
+        print(f"Created GritLM: {self.model.dtype} dtype, {pooling_method} pool, {mode} mode, {attn} attn")
+
+        if is_inference:
+            # Padding side right is necessary for `embed_instruction` to index correctly
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, padding_side='right')
+            if not(self.tokenizer.pad_token) and self.tokenizer.eos_token:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+                print('Set pad token to eos token: ' + self.tokenizer.pad_token)        
+            if self.embed_eos:
+                assert self.embed_eos in self.tokenizer.vocab, f"EOS token {self.embed_eos} not in vocab"
+            self.model.eval()
+            if not("device_map" in kwargs):
+                self.model.to(self.device)
+                # Parallelize embedding model
+                if mode == 'embedding':
+                    self.num_gpus = torch.cuda.device_count()
+                    if self.num_gpus > 1:
+                        print(f"----------Using {self.num_gpus} data-parallel GPUs----------")
+                        self.model = torch.nn.DataParallel(self.model)
+
+    def encode_queries(self, queries: Union[List[str], str], **kwargs) -> np.ndarray:
+        """Used for encoding the queries of retrieval or reranking tasks"""
+        return self.encode(queries, **kwargs)
+
+    def encode_corpus(self, corpus: Union[List[str], str, List[Dict[str, str]]], **kwargs) -> np.ndarray:
+        """Used for encoding the corpus of retrieval tasks"""
+        if isinstance(corpus, dict):
+            corpus = [corpus]
+        if isinstance(corpus, list) and isinstance(corpus[0], dict):
+            corpus = [
+                doc["title"] + " " + doc["text"] if "title" in doc 
+                else doc["text"] for doc in corpus
+            ]
+        return self.encode(corpus, **kwargs)
+
+    @torch.no_grad()
+    def encode(
+        self,
+        sentences: Union[List[str], str],
+        batch_size: int = 256,
+        max_length: int = 512,
+        instruction: str = "",
+        embed_instruction: bool = False,
+        get_cache: bool = False,
+        convert_to_tensor: bool = False,
+        recast: bool = False,
+        add_special_tokens: bool = True,
+        **kwargs,
+    ) -> np.ndarray:
+        if self.num_gpus > 1:
+            batch_size *= self.num_gpus
+
+        input_was_string = False
+        if isinstance(sentences, str):
+            sentences = [sentences]
+            input_was_string = True
+
+        all_embeddings, all_kv_caches, input_ids, last_hidden_states = [], [], [], []
+        for start_index in tqdm(range(0, len(sentences), batch_size), desc="Batches", disable=len(sentences)<256):
+            sentences_batch = [
+                instruction + s + self.embed_eos for s in sentences[start_index:start_index + batch_size]
+            ]
+            # This will prepend the bos token if the tokenizer has `add_bos_token=True`
+            inputs = self.tokenizer(
+                sentences_batch,
+                padding=True,
+                truncation=True,
+                return_tensors='pt',
+                max_length=max_length,
+                add_special_tokens=add_special_tokens,
+            ).to(self.device)
+
+            if (self.attn is not None) and (self.attn[:2] == 'bb'):
+                inputs["is_causal"] = False
+            if get_cache:
+                inputs['use_cache'] = True
+            outputs = (
+                getattr(self.model, self.embedding_attr) if self.embedding_attr else self.model
+            )(**inputs)
+            last_hidden_state = outputs[0]
+            if get_cache:
+                # Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of shape `(batch_size, num_heads, sequence_length, embed_size_per_head)`
+                assert len(all_kv_caches) == 0, "Can only get cache for one batch at a time"
+                all_kv_caches = outputs[1]
+
+            if self.projection:
+                last_hidden_state = self.projection(last_hidden_state)
+            if (instruction) and (embed_instruction is False) and ("mean" in self.pooling_method):
+                # Remove instruction tokens from the embeddings by masking them
+                instruction_tokens = self.tokenizer(
+                    instruction,
+                    padding=False,
+                    truncation=True,
+                    max_length=max_length,
+                    add_special_tokens=add_special_tokens,
+                )["input_ids"]
+                inputs['attention_mask'][:, :len(instruction_tokens)] = 0
+            input_ids.extend([input_id[mask>0].cpu().numpy() for input_id, mask in zip(inputs['input_ids'], inputs['attention_mask'])])
+            last_hidden_state = last_hidden_state.to(inputs['attention_mask'].device)
+            last_hidden_states.extend([lhs[mask>0].cpu().to(torch.float32).numpy() for lhs, mask in zip(last_hidden_state, inputs['attention_mask'])])
+            embeddings = self.pooling(last_hidden_state, inputs['attention_mask'], recast=recast)
+            # Normalize can change the dtype (https://discuss.pytorch.org/t/tensor-in-float16-is-transformed-into-float32-after-torch-norm/110891)
+            if self.normalized: 
+                in_dtype = embeddings.dtype
+                last_hidden_states = [lhs / torch.norm(emb).item() for lhs, emb in zip(last_hidden_states, embeddings)]
+                embeddings = torch.nn.functional.normalize(embeddings, dim=-1).to(in_dtype)
+            embeddings = cast(torch.Tensor, embeddings)
+            if convert_to_tensor:
+                all_embeddings.append(embeddings)
+            else:
+                # NumPy does not support bfloat16
+                all_embeddings.append(embeddings.cpu().to(torch.float32).numpy())
+
+        all_embeddings = (
+            torch.cat(all_embeddings, dim=0) if convert_to_tensor else np.concatenate(all_embeddings, axis=0)
+        )
+        if input_was_string:
+            all_embeddings = all_embeddings[0]
+        if get_cache:
+            # all_kv_caches = (
+            #     torch.stack(all_kv_caches, dim=0) if convert_to_tensor else np.concatenate(all_kv_caches, axis=0)
+            # )
+            return all_embeddings, all_kv_caches
+        return all_embeddings, input_ids, last_hidden_states
+
+    def pooling(
+        self, hidden_state: torch.Tensor, attention_mask: torch.Tensor = None, recast: bool = False
+    ) -> torch.Tensor:
+        """
+        Args:
+            hidden_state: [b, n, d]
+            attention_mask: [b, n]
+        """
+        # In case the model is distributed across multiple devices; hidden_state may end up on diff device
+        hidden_state = hidden_state.to(attention_mask.device)
+        if self.pooling_method == 'cls':
+            embedding = hidden_state[:, 0]
+        elif self.pooling_method == 'lasttoken':
+            b, n, d = hidden_state.size()
+            # Get the last `1` in the attention mask of each item
+            # Often it is just `gather_indices = torch.argmin(attention_mask, 1, keepdim=False) - 1`
+            # except when 1) There's all 1's 2) There's 0's before the 1's
+            reversed_mask = torch.flip(attention_mask, dims=(1,))
+            argmax_reverse = torch.argmax(reversed_mask, dim=1, keepdim=False)
+            gather_indices = attention_mask.size(1) - argmax_reverse - 1
+            # If there are empty sequences, where the index would become -1 it will crash so set them to 0
+            gather_indices = torch.clamp(gather_indices, min=0)
+            # Turn indices from shape [b] -> [b, 1, d]
+            gather_indices = gather_indices.unsqueeze(-1).repeat(1, d)
+            gather_indices = gather_indices.unsqueeze(1)
+            assert gather_indices.shape == (b, 1, d)
+            # Gather along the seq len: [b, n, d] -> [b, d]
+            # Actually no need for the attention mask as we gather the last token where attn_mask=1 but
+            # as some indices (which shouldn't be attended to) may be 0 due to clamp, use mask to ignore them again
+            input_mask_expanded = attention_mask.unsqueeze(-1).expand((b, n, d)).float()
+            embedding = torch.gather(hidden_state * input_mask_expanded, 1, gather_indices).squeeze(dim=1)
+        elif self.pooling_method in ['mean', 'weightedmean']:
+            if self.pooling_method == 'weightedmean':
+                attention_mask *= attention_mask.cumsum(dim=1) # [0,1,1,1,0,0] -> [0,1,2,3,0,0]
+            s = torch.sum(hidden_state * attention_mask.unsqueeze(-1).float(), dim=1)
+            d = attention_mask.sum(dim=1, keepdim=True).float()
+            embedding = s / d
+        else: raise NotImplementedError(f"Unknown pooling method: {self.pooling_method}")
+        # Recasting performs slightly worse but saves 50% space
+        if recast: return embedding.to(hidden_state.dtype)
+        return embedding
+
 
 class LLM:
     def __init__(self, llm_name:str="mistralai/Mistral-7B-Instruct-v0.2") -> None:
-        self.generator = pipeline("text-generation", llm_name, device_map='auto')
+        self.generator = pipeline("text-generation", llm_name, device_map='auto', batch_size=3)
         
     def __call__(self, prompt:str | List[str], n:int=1, temperature:float=0.0) -> List[List[str]]:
         config = GenerationConfig(
@@ -194,6 +427,17 @@ class LLM:
             for p_gen in self.generator([[{"role": "user", "content": p}] for p in prompt], generation_config=config)]
         
     
+class RetrieverOutput:
+    def __init__(self, embeddings:np.ndarray, last_hidden_states:List[np.ndarray]=None, retriever_input:BatchEncoding=None) -> None:
+        self.embeddings = embeddings
+        self.input_ids:np.ndarray
+        self.attention_mask:np.ndarray
+        if retriever_input:
+            self.input_ids = retriever_input['input_ids'].cpu().numpy()
+            self.attention_mask = retriever_input['attention_mask'].cpu().numpy()
+        self.last_hidden_states = last_hidden_states
+        
+        
 class Retriever:
     def __init__(self, retriever_name:str='facebook/contriever', device='cpu') -> None:
         self.retriever_tokenizer = AutoTokenizer.from_pretrained(retriever_name)
@@ -205,27 +449,34 @@ class Retriever:
             self.retriever_model.cuda(device=self.device)
         
     @staticmethod
-    def _mean_pooling(token_embeddings:torch.Tensor, mask) -> torch.Tensor:
+    def _mean_pooling(token_embeddings:torch.Tensor, mask:torch.Tensor) -> torch.Tensor:
         token_embeddings = token_embeddings.masked_fill(~mask[..., None].bool(), 0.)
         sentence_embeddings:torch.Tensor  = token_embeddings.sum(dim=1) / mask.sum(dim=1)[..., None]
         return sentence_embeddings
     
-    def embed_paragraphs(self, paragraphs:List[str], normalize:bool=False) -> np.ndarray:
+    def embed_paragraphs(self, paragraphs:List[str], normalize:bool=False, complete_return:bool=False):
         retriever_input = self.retriever_tokenizer.batch_encode_plus(paragraphs, padding=True, truncation=True, return_tensors='pt')
         if self.device:
             retriever_input = retriever_input.to(self.device)
         with torch.no_grad():
             retriever_output = self.retriever_model(**retriever_input)
-            paragraph_embeddings = self._mean_pooling(retriever_output[0], retriever_input['attention_mask']).cpu().numpy()
+            paragraph_embeddings:np.ndarray = self._mean_pooling(retriever_output[0], retriever_input['attention_mask']).cpu().numpy()
+            last_hidden_states = [lhs[mask>0].cpu().numpy() for lhs, mask in zip(retriever_output[0], retriever_input['attention_mask'])]
         if normalize:
-            paragraph_embeddings = paragraph_embeddings / np.expand_dims(np.linalg.norm(paragraph_embeddings, axis=1), axis=1)
+            norms = np.linalg.norm(paragraph_embeddings, axis=1)
+            paragraph_embeddings = paragraph_embeddings / np.expand_dims(norms, axis=1)
+            last_hidden_states = [lhs / n for lhs, n in zip(last_hidden_states, norms)]
+        if complete_return:
+            return RetrieverOutput(paragraph_embeddings, last_hidden_states, retriever_input)
         return paragraph_embeddings
     
-    def dense_retrieval(self, question:str, paragraphs:Union[List[str], np.ndarray], k:int=5):
-        doc_embeds = paragraphs if isinstance(paragraphs, np.ndarray) else self.embed_paragraphs(paragraphs)
-        query_embed = self.embed_paragraphs([question])
+    def dense_retrieval(self, question:Union[str, np.ndarray], paragraphs:Union[List[str], np.ndarray], k:int=5, normalize:bool=False, return_score:bool=False):
+        doc_embeds = paragraphs if isinstance(paragraphs, np.ndarray) else self.embed_paragraphs(paragraphs, normalize)
+        query_embed = question if isinstance(question, np.ndarray) else self.embed_paragraphs([question], normalize)
         scores = doc_embeds.dot(query_embed.squeeze())
         max_indices:List[int] = np.argsort(scores)[::-1][:k].tolist()
+        if return_score:
+            return max_indices, [scores[i] for i in max_indices]
         return max_indices
     
     
@@ -271,7 +522,8 @@ class Dataset:
         self.answer_format = None
         self.question_type = None
         self.data = []
-        self.llm_server = LLMServer(llm)
+        if llm:
+            self.llm_server = LLMServer(llm)
         self.split = split
         self.load_split()
         self.data_dir = Path(os.path.join(self.dataset_name, self.split))
@@ -353,7 +605,7 @@ class Dataset:
             if wcount < 350:
                 pause_point = len(paragraphs)
             else:
-                prompt = prompt_pagination_template.format(preceding, '\n'.join(passage), end_tag)
+                prompt = GeneralPrompt.pagination(preceding, '\n'.join(passage), end_tag)
                 response = self.llm_server(prompt=prompt)[0].strip()
                 pause_point = self.parse_pause_point(response)
                 if pause_point and (pause_point <= i or pause_point > j):
@@ -642,7 +894,7 @@ class ReadingAgent:
 
         shortened_pages = []
         for i, page in enumerate(pages):
-            prompt = prompt_shorten_template.format('\n'.join(page))
+            prompt = GeneralPrompt.shorten('\n'.join(page))
             response = self.llm_server(prompt)[0]
             shortened_text = response.strip()
             shortened_pages.append(shortened_text)
@@ -681,7 +933,7 @@ class ReadingAgent:
             menu = '\n'.join([f"<Page {i}>\n{shortened_text}" for i, shortened_text in enumerate(shortened_pages)])
             log_info(log_file, 'menu', menu)
 
-            prompt_lookup = prompt_parallel_lookup_template.format(menu, query)
+            prompt_lookup = ReadingAgentPrompt.parallel_lookup(menu, query)
             # log_info(log_file, 'lookup_prompt', prompt_lookup)
 
             page_ids = []
@@ -702,7 +954,7 @@ class ReadingAgent:
                 log_info(log_file, 'menu', menu)
                 
                 # prompt_lookup = prompt_sequential_lookup_template.format(menu, query, ', '.join(map(str, retrieved_passage_nums)))
-                prompt_lookup = prompt_sequential_lookup_template.format(menu, query.split('\n')[0], ', '.join(map(str, retrieved_passage_nums)))
+                prompt_lookup = ReadingAgentPrompt.sequential_lookup(menu, query.split('\n')[0], ', '.join(map(str, retrieved_passage_nums)))
                 # log_info(log_file, 'lookup_prompt', prompt_lookup)
                 
                 response = self.llm_server(prompt=prompt_lookup)[0].strip()
@@ -734,7 +986,7 @@ class ReadingAgent:
         expanded_shortened_article = '\n'.join(expanded_shortened_pages)
         log_info(log_file, 'retrieval_result', expanded_shortened_article)
 
-        response = self.llm_server(prompt=prompt_answer_template.format(question_type=self.dataset.question_type, article=expanded_shortened_article, question=query, answer_format=self.dataset.answer_format))[0]
+        response = self.llm_server(prompt=GeneralPrompt.answer(self.dataset.question_type, expanded_shortened_article, query, self.dataset.answer_format))[0]
         response = response.strip()
         log_info(log_file, 'generation', response)
     
@@ -743,7 +995,8 @@ class LongDoc:
     
     def __init__(self, dataset:Dataset, retriever:Retriever, llm:Union[str, LLM]="mistralai/Mistral-7B-Instruct-v0.2") -> None:
         self.dataset = dataset
-        self.llm_server = LLMServer(llm)
+        if llm:
+            self.llm_server = LLMServer(llm)
         self.retriever = retriever
 
     def _parse_to_graph(self, response:str):
@@ -997,7 +1250,7 @@ class LongDoc:
         log_info(log_file, 'retrieval_result', retrieval_result)
         
         # Step 3: analyze retrieved info
-        generation = self.llm_server(prompt_answer_template.format(question_type=self.dataset.question_type, article=retrieval_result, question=query, answer_format=self.dataset.answer_format))[0]
+        generation = self.llm_server(GeneralPrompt.answer(self.dataset.question_type, retrieval_result, query, self.dataset.answer_format))[0]
         log_info(log_file, 'generation', generation)
         
 
@@ -1014,7 +1267,7 @@ class LongDoc:
         step = 1
         while True:
             if step >= 6:
-                generation = self.llm_server(prompt_answer_template.format(question_type=dataset.question_type, article=context, question=init_question, answer_format=dataset.answer_format))[0]
+                generation = self.llm_server(GeneralPrompt.answer(dataset.question_type, context, init_question, dataset.answer_format))[0]
                 log_info(log_file, 'generation', generation)
                 break
             if state == 'retrieve':
@@ -1094,7 +1347,7 @@ class LongDoc:
                     answer_grade_response = self.llm_server(answer_grade_template.format(question=init_query, generation=generation))[0]
                     log_info(log_file, 'answer_grade_response', answer_grade_response)
                     if 'yes' in answer_grade_response.lower():
-                        generation = self.llm_server(prompt_answer_template.format(question_type=dataset.question_type, article=context, question=init_question, answer_format=dataset.answer_format))[0]
+                        generation = self.llm_server(GeneralPrompt.answer(dataset.question_type, context, init_question, dataset.answer_format))[0]
                         log_info(log_file, 'generation', generation)
                         break
                     else:
