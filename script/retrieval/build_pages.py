@@ -5,24 +5,27 @@ sys.path.append('../..')
 from src.base import *
 from src.base_utils import write_json, read_json
 from src.data import QualityDataset, NarrativeQADataset, LooGlEDataset, MuSiQueDataset
-from src.models import LLMServer, Retriever
-from src.index_files import ReadingAgent, LongDoc
+from src.models import LLMServer, Retriever, LLM
+from src.index_files import ReadingAgent, LongDoc, DocSplit
 
-llm_server = LLMServer()
-retriever = Retriever()
+# llm = LLM(device_map='cuda:1')
+llm = "mistralai/Mistral-7B-Instruct-v0.2"
+retriever = Retriever(device='cuda:1')
 
 # dataset = NarrativeQADataset()
 # dataset = LooGlEDataset()
-dataset = QualityDataset(split='dev')
+dataset = QualityDataset(llm, split='dev')
 # dataset = MuSiQueDataset()
-reading_agent = ReadingAgent(dataset)
-# longdoc = LongDoc(dataset, retriever)
-longdoc = LongDoc(retriever)
 
-start = 0
-end = 40
+reading_agent = ReadingAgent(dataset, llm)
+longdoc = LongDoc(retriever, llm)
+doc_split = DocSplit('intfloat/multilingual-e5-large')
+
+start =0
+end = 20
 w_note = True
 r_num = 2
+match_num = 2
 
 import sys
 
@@ -31,7 +34,8 @@ for eid in range(start, end):
     page_file = os.path.join(dataset.data_dir, f'pages_{eid}.json')
     if sys.argv[1] == 'page':
         if not os.path.exists(page_file):
-            write_json(page_file, dataset.pagination(dataset.get_article(dataset.data[eid]), verbose=False))
+            # write_json(page_file, dataset.pagination(dataset.get_article(dataset.data[eid]), verbose=False))
+            write_json(page_file, doc_split.split_paragraphs(dataset.get_article(dataset.data[eid]), 512))
         
     else:
         if os.path.exists(page_file):
@@ -45,7 +49,7 @@ for eid in range(start, end):
         
             elif sys.argv[1] == 'index':
                 if w_note:
-                    file_name = f'index_w_{r_num}_{eid}.json'
+                    file_name = f'index_wg_{match_num}_{r_num}_{eid}.json'
                 else:
                     file_name = f'index_{eid}.json'
-                write_json(os.path.join(dataset.data_dir, file_name), [ci.to_json() for ci in longdoc.index_text(['\n'.join(page) for page in pages], w_note, r_num)])
+                write_json(os.path.join(dataset.data_dir, file_name), [ci.to_json() for ci in longdoc.index_text(pages, w_note, match_num, r_num)])

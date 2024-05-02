@@ -1,118 +1,115 @@
 import copy
+from sklearn.cluster import DBSCAN
+import spacy
 
 from .prompt import GeneralPrompt, LongDocPrompt, ReadingAgentPrompt
 from .data import *
 
-# class DocSplit:
-#     def split_trec(text:str):
-#         lines = text.splitlines()
-#         return ['\n'.join(lines[i * 2 : i * 2 + 1]) for i in range(len(lines) // 2)]
+class DocSplit:
+    def split_trec(text:str):
+        lines = text.splitlines()
+        return ['\n'.join(lines[i * 2 : i * 2 + 1]) for i in range(len(lines) // 2)]
 
-#     def split_triviaqa(text:str):
-#         lines = text.splitlines()
-#         paragraphs = []
-#         paragraph = []
-#         lid = 0
-#         while lid < len(lines):
-#             paragraph.append(lines[lid])
-#             if lines[lid] == 'Answer:':
-#                 lid += 1
-#                 paragraph.append(lines[lid])
-#                 paragraphs.append('\n'.join(paragraph))
-#                 paragraph.clear()
-#             lid += 1
-#         return paragraphs
+    def split_triviaqa(text:str):
+        lines = text.splitlines()
+        paragraphs = []
+        paragraph = []
+        lid = 0
+        while lid < len(lines):
+            paragraph.append(lines[lid])
+            if lines[lid] == 'Answer:':
+                lid += 1
+                paragraph.append(lines[lid])
+                paragraphs.append('\n'.join(paragraph))
+                paragraph.clear()
+            lid += 1
+        return paragraphs
 
-#     def split_samsum(text:str):
-#         paragraphs = []
-#         paragraph = []
-#         for line in text.splitlines():
-#             paragraph.append(line)
-#             if line.startswith('Summary: '):
-#                 paragraphs.append('\n'.join(paragraph))
-#                 paragraph.clear()
-#         return paragraphs
+    def split_samsum(text:str):
+        paragraphs = []
+        paragraph = []
+        for line in text.splitlines():
+            paragraph.append(line)
+            if line.startswith('Summary: '):
+                paragraphs.append('\n'.join(paragraph))
+                paragraph.clear()
+        return paragraphs
 
-#     paragraph_sep_map = {
-#         'qasper': '\n', 
-#         'multifieldqa_zh': '\n', 
-#         'qmsum': '\n', 
-#         'multi_news': '\n', 
-#         'vcsum': '\n', 
-#         'trec': (split_trec, '\n'), 
-#         'triviaqa': (split_triviaqa, '\n'), 
-#         'samsum': (split_samsum, '\n'), 
-#     }
+    paragraph_sep_map = {
+        'qasper': '\n', 
+        'multifieldqa_zh': '\n', 
+        'qmsum': '\n', 
+        'multi_news': '\n', 
+        'vcsum': '\n', 
+        'trec': (split_trec, '\n'), 
+        'triviaqa': (split_triviaqa, '\n'), 
+        'samsum': (split_samsum, '\n'), 
+    }
     
-#     def __init__(self, llm_name:str) -> None:
-#         self.llm_name = llm_name
-#         self.llm_tokenizer = AutoTokenizer.from_pretrained(self.llm_name)
+    def __init__(self, llm_name:str) -> None:
+        self.llm_name = llm_name
+        self.llm_tokenizer = AutoTokenizer.from_pretrained(self.llm_name)
         
-#     def _append_paragraph(self, paragraphs:list, tokenized_p:List[str]):
-#         paragraph = self.llm_tokenizer.decode(tokenized_p)
-#         paragraphs.append(paragraph)
-#         tokenized_p.clear()
+    def _append_paragraph(self, paragraphs:list, tokenized_p:List[int]):
+        paragraph = self.llm_tokenizer.decode(tokenized_p)
+        paragraphs.append(paragraph)
+        tokenized_p.clear()
         
-#     def get_task_paragraph_sep(self, task_name:str):
-#         sep = self.paragraph_sep_map.get(task_name, '\n\n')
-#         if not isinstance(sep, str):
-#             func, sep = sep
-#         return sep
+    def get_task_paragraph_sep(self, task_name:str):
+        sep = self.paragraph_sep_map.get(task_name, '\n\n')
+        if not isinstance(sep, str):
+            func, sep = sep
+        return sep
     
-#     def split_context_to_paragraphs(self, context:str, task_name:str):
-#         sep = self.paragraph_sep_map.get(task_name, '\n\n')
-#         if isinstance(sep, str):
-#             return context.split(sep)
-#         else:
-#             func, sep = self.paragraph_sep_map[task_name]
-#             return func(context)
+    # def split_context_to_paragraphs(self, context:str, task_name:str):
+    #     sep = self.paragraph_sep_map.get(task_name, '\n\n')
+    #     if isinstance(sep, str):
+    #         return context.split(sep)
+    #     else:
+    #         func, sep = self.paragraph_sep_map[task_name]
+    #         return func(context)
         
-#     def split_single_paragraph(self, text:str, paragraph_size:int=300, is_natural_language:bool=True):
-#         splited_paragraphs:List[str] = []
-#         splited_paragraph = []
-#         sentences:List[str] = sent_tokenize(text) if is_natural_language else text.split('\n')
-#         for sent in sentences:
-#             tokenized_s = self.llm_tokenizer.encode(sent)[1:]
-#             if len(tokenized_s) <= paragraph_size:
-#                 if len(splited_paragraph) + len(tokenized_s) > paragraph_size:
-#                     self._append_paragraph(splited_paragraphs, splited_paragraph)
-#                 splited_paragraph.extend(tokenized_s)
-#             else:
-#                 if splited_paragraph:
-#                     self._append_paragraph(splited_paragraphs, splited_paragraph)
-#                 chunk_size = (len(tokenized_s) - 1) // paragraph_size + 1
-#                 for i in range(chunk_size - 1):
-#                     self._append_paragraph(splited_paragraphs, tokenized_s[i * paragraph_size: (i+1) * paragraph_size])
-#                 splited_paragraph = tokenized_s[(chunk_size - 1) * paragraph_size:]
-#         return splited_paragraphs, splited_paragraph
+    # def split_single_paragraph(self, text:str, paragraph_size:int=300, is_natural_language:bool=True):
+    #     splited_paragraphs:List[str] = []
+    #     splited_paragraph = []
+    #     sentences:List[str] = sent_tokenize(text) if is_natural_language else text.split('\n')
+    #     for sent in sentences:
+    #         tokenized_s = self.llm_tokenizer.encode(sent)[1:]
+    #         if len(tokenized_s) <= paragraph_size:
+    #             if len(splited_paragraph) + len(tokenized_s) > paragraph_size:
+    #                 self._append_paragraph(splited_paragraphs, splited_paragraph)
+    #             splited_paragraph.extend(tokenized_s)
+    #         else:
+    #             if splited_paragraph:
+    #                 self._append_paragraph(splited_paragraphs, splited_paragraph)
+    #             chunk_size = (len(tokenized_s) - 1) // paragraph_size + 1
+    #             for i in range(chunk_size - 1):
+    #                 self._append_paragraph(splited_paragraphs, tokenized_s[i * paragraph_size: (i+1) * paragraph_size])
+    #             splited_paragraph = tokenized_s[(chunk_size - 1) * paragraph_size:]
+    #     return splited_paragraphs, splited_paragraph
         
-#     def split_paragraphs(self, text:str, task_name:str, paragraph_size:int=300):
-#         reformated_paragraphs:List[str] = []
-#         completion_labels:List[bool] = []
-#         reformated_paragraph = []
+    def split_paragraphs(self, text:str, paragraph_size:int=300):
+        reformated_paragraphs:List[str] = []
+        reformated_paragraph = []
+        paragraph_size -= 2 # Remove <s> and </s>
         
-#         paragraph_sep = self.get_task_paragraph_sep(task_name)
-#         paragraphs = text.split(paragraph_sep)
-#         for p in paragraphs:
-#             tokenized_p = self.llm_tokenizer.encode(p + paragraph_sep)[1:]
-#             if len(tokenized_p) <= paragraph_size:
-#                 if len(reformated_paragraph) + len(tokenized_p) > paragraph_size:
-#                     self._append_paragraph(reformated_paragraphs, reformated_paragraph)
-#                     completion_labels.append(True)
-#                 reformated_paragraph.extend(tokenized_p)
-#             else:
-#                 if reformated_paragraph:
-#                     self._append_paragraph(reformated_paragraphs, reformated_paragraph)
-#                     completion_labels.append(True)
-#                 splited_paragraphs, splited_paragraph = self.split_single_paragraph(p, paragraph_size)
-#                 reformated_paragraphs.extend(splited_paragraphs)
-#                 completion_labels.extend([False] * len(splited_paragraphs))
-#                 reformated_paragraph = splited_paragraph
+        for s in sent_tokenize(text):
+            tokenized_s = self.llm_tokenizer.encode(s)[1:-1]
+            if len(tokenized_s) <= paragraph_size:
+                if len(reformated_paragraph) + len(tokenized_s) > paragraph_size:
+                    self._append_paragraph(reformated_paragraphs, reformated_paragraph)
+                reformated_paragraph.extend(tokenized_s)
+            else:
+                reformated_paragraph.extend(tokenized_s)
+                p_start, p_end = 0, paragraph_size
+                while p_end <= len(reformated_paragraph):
+                    self._append_paragraph(reformated_paragraphs, tokenized_s[p_start:p_end])
+                    p_start, p_end = p_end, p_end + paragraph_size
+                reformated_paragraph = reformated_paragraph[p_start:p_end]
                 
-#         if reformated_paragraph:
-#             self._append_paragraph(reformated_paragraphs, reformated_paragraph)
-#             completion_labels.append(True)
-#         return reformated_paragraphs, completion_labels
+        if reformated_paragraph:
+            self._append_paragraph(reformated_paragraphs, reformated_paragraph)
+        return reformated_paragraphs
 
 
 class ReadingAgent:
@@ -232,8 +229,9 @@ class LongDoc:
         if llm:
             self.llm_server = LLMServer(llm)
         self.retriever = retriever
+        self.nlp = spacy.load('en_core_web_lg')
         
-    def retrieve_descriptions(self, notes:List[ChunkInfo], relation_graph:nx.Graph, target_ents:List[str], r_num:int=1):
+    def retrieve_descriptions(self, notes:List[ChunkInfo], relation_graph:nx.Graph, target_ents:List[str], match_num:int=5, r_num:int=1, retrieval_guaranteed:bool=False):
         ent2pids = defaultdict(list)
         pid:int
         for pid, note in enumerate(notes):
@@ -242,7 +240,7 @@ class LongDoc:
         all_ents = list(ent2pids.keys())
         target_ents_emb:np.ndarray = self.retriever.embed_paragraphs(target_ents, True)
         refer_ents_emb:np.ndarray = self.retriever.embed_paragraphs(all_ents, True)
-        ent_map = LongDocPrompt.match_entities(target_ents, all_ents, target_ents_emb, refer_ents_emb, 5)
+        ent_map = LongDocPrompt.match_entities(target_ents, all_ents, target_ents_emb, refer_ents_emb, match_num, retrieval_guaranteed)
         prev_ent_descriptions:Dict[int, Dict[str, str]] = defaultdict(dict)
         for _, mentions in ent_map.items():
             for mention in mentions:
@@ -251,7 +249,7 @@ class LongDoc:
         prev_relation_descriptions:Dict[int, List[Tuple[List[str], str]]] = defaultdict(list)
         all_nodes = list(relation_graph.nodes)
         refer_ents_emb:np.ndarray = self.retriever.embed_paragraphs(all_nodes, True)
-        node_map = LongDocPrompt.match_entities(target_ents, all_nodes, target_ents_emb, refer_ents_emb, 5)
+        node_map = LongDocPrompt.match_entities(target_ents, all_nodes, target_ents_emb, refer_ents_emb, match_num, retrieval_guaranteed)
         sub_nodes = set()
         for ent, mentions in node_map.items():
             sub_nodes.update(mentions)
@@ -265,7 +263,72 @@ class LongDoc:
                         visited_relation_descriptions.add((pid, rid))
         return prev_ent_descriptions, prev_relation_descriptions
 
-    def index_text(self, paragraphs:List[str], w_note:bool=True, r_num:int=1):
+    def collect_entities_from_text(self, text:str):
+        doc = self.nlp(text)
+        ncs = [nc if nc[0].pos_ != 'DET' else nc[1:] for nc in doc.noun_chunks if nc.root.pos_ not in ['NUM', 'PRON']]
+        ents = [ent if ent[0].pos_ != 'DET' else ent[1:] for ent in doc.ents if ent.root.pos_ not in ['NUM', 'PRON']]
+        ncs_spans = [(nc.start, nc.end) for nc in ncs]
+        ents_spans = [(ent.start, ent.end) for ent in ents]
+        nc_id, eid = 0, 0
+        spans = []
+        while nc_id < len(ncs_spans) and eid < len(ents_spans):
+            nc_span, ent_span = ncs_spans[nc_id], ents_spans[eid]
+            if set(range(*nc_span)).intersection(range(*ent_span)):
+                merged_span = (min(nc_span[0], ent_span[0]), max(nc_span[1], ent_span[1]))
+                spans.append(merged_span)
+                nc_id += 1
+                eid += 1
+            else:
+                if nc_span[0] < ent_span[0]:
+                    spans.append(nc_span)
+                    nc_id += 1
+                else:
+                    spans.append(ent_span)
+                    eid += 1
+        spans.extend(ncs_spans[nc_id:])
+        spans.extend(ents_spans[eid:])
+        updated_spans:List[Tuple[int, int]] = []
+        for span in spans:
+            doc_span = doc[span[0]:span[1]]
+            if ',' in doc_span.text:
+                start = doc_span.start
+                for t in doc_span:
+                    if t.text == ',':
+                        if t.i != start:
+                            updated_spans.append((start, t.i))
+                        start = t.i + 1
+                if start < span[1]:
+                    updated_spans.append((start, span[1]))
+            else:
+                updated_spans.append(span)
+        updated_spans = [span for span in updated_spans if any([t.pos_ in ['NOUN', 'PROPN'] for t in doc[span[0]:span[1]]])]
+        ent_candidates = [doc[span[0]:span[1]].text if (span[1] - span[0]) > 1 else doc[span[0]].lemma_ for span in updated_spans]
+        return ent_candidates
+    
+    def collect_global_entities(self, paragraphs:List[str]):
+        ent_candidates_all = list()
+        ent_candidates_pid = list()
+        for pid, passage in enumerate(paragraphs):
+            ent_candidates = self.collect_entities_from_text(passage)
+            ent_candidates_all.extend(ent_candidates)
+            ent_candidates_pid.extend([pid] * len(ent_candidates))
+        ent_candidates_all_emb = self.retriever.embed_paragraphs(ent_candidates_all)
+        ent_candidates_pid = np.array(ent_candidates_pid)
+        db = DBSCAN(eps=0.3, min_samples=2, metric="cosine").fit(ent_candidates_all_emb)
+        ent_class = defaultdict(set)
+        for class_id in range(db.labels_.max() + 1):
+            if len(set(ent_candidates_pid[db.labels_ == class_id])) >= 2:
+                ent_class[class_id]
+        ent_candidates_per_passage = defaultdict(set)
+        for label, ent, pid in zip(db.labels_, ent_candidates_all, ent_candidates_pid):
+            if label in ent_class:
+                ent_class[label].add(ent)
+                ent_candidates_per_passage[pid].add(ent)
+        return ent_candidates_per_passage
+    
+    def index_text(self, paragraphs:List[str], w_note:bool=True, match_num:int=5, r_num:int=1):
+        # Collect useful entities
+        ent_candidates_per_passage = self.collect_global_entities(paragraphs)
         results:List[ChunkInfo] = []
         relation_graph = nx.Graph()
         for cur_pid, paragraph in enumerate(tqdm(paragraphs)):
@@ -273,16 +336,22 @@ class LongDoc:
             if results and w_note:
                 summary_recap = {pid: results[pid].summary for pid in range(max(len(results)-r_num, 0), len(results))}
                 chunk_info.prev_summaries = summary_recap
-                list_entity_prompt = LongDocPrompt.list_entity_w_note(chunk_info.recap_str, paragraph)
+                
+            if cur_pid not in ent_candidates_per_passage:
+                if results and w_note:
+                    list_entity_prompt = LongDocPrompt.list_entity_w_note(chunk_info.recap_str, paragraph)
+                else:
+                    list_entity_prompt = LongDocPrompt.list_entity(paragraph)
+                # Extract important entities
+                chat_response = self.llm_server(list_entity_prompt, 5, 0.7)[0]
+                important_ents = LongDocPrompt.parse_entities(chat_response, lambda x: self.retriever.embed_paragraphs(x, True))
             else:
-                list_entity_prompt = LongDocPrompt.list_entity(paragraph)
-            # Extract important entities
-            chat_response = self.llm_server(list_entity_prompt, 5, 0.7)[0]
-            chunk_info.important_ents = LongDocPrompt.parse_entities(chat_response, lambda x: self.retriever.embed_paragraphs(x, True))
+                important_ents = ent_candidates_per_passage[cur_pid]
+            chunk_info.important_ents = list(important_ents)
             
             # Generate entity description, summary, relation description
             if results and w_note:
-                chunk_info.prev_ent_descriptions, chunk_info.prev_relation_descriptions = self.retrieve_descriptions(results, relation_graph, chunk_info.important_ents, r_num)
+                chunk_info.prev_ent_descriptions, chunk_info.prev_relation_descriptions = self.retrieve_descriptions(results, relation_graph, chunk_info.important_ents, match_num, r_num)
                 recap_str = chunk_info.recap_str
                 ent_description_prompt = LongDocPrompt.ent_description_w_note(recap_str, paragraph, chunk_info.important_ents)
                 summary_prompt = LongDocPrompt.shorten_w_note(recap_str, paragraph)
@@ -307,6 +376,17 @@ class LongDoc:
                         temp_pids.append(cur_pid)
         return results
     
+    def build_relation_graph(self, notes:List[ChunkInfo]):
+        relation_graph = nx.Graph()
+        for cur_pid, chunk_info in enumerate(notes):
+            for related_ents, _ in chunk_info.relation_descriptions:
+                for ent1, ent2 in itertools.combinations(related_ents, 2):
+                    if not relation_graph.has_edge(ent1, ent2):
+                        relation_graph.add_edge(ent1, ent2, pids=[])
+                    temp_pids:List[int] = relation_graph.get_edge_data(ent1, ent2)['pids']
+                    if cur_pid not in temp_pids:
+                        temp_pids.append(cur_pid)
+        return relation_graph
     
 if __name__ == '__main__':
     

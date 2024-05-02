@@ -110,7 +110,7 @@ class LongDocPrompt(GeneralPrompt):
         return '''Generate your response in the following format:\n"Important entities:\n1. Entity 1\n2. Entity 2\n3. Entity 3\n..."'''
     
     @staticmethod
-    def match_entities(target_ents:List[str], refer_ents:List[str], target_ents_emb:np.ndarray, refer_ents_emb:np.ndarray, top_k:int=1):
+    def match_entities(target_ents:List[str], refer_ents:List[str], target_ents_emb:np.ndarray, refer_ents_emb:np.ndarray, top_k:int=1, retrieval_guaranteed:bool=False):
         sim_mat:np.ndarray = np.matmul(target_ents_emb, refer_ents_emb.T)
         ent_map:Dict[str, List[str]] = defaultdict(list)
         for eid, ent in enumerate(target_ents):
@@ -118,6 +118,8 @@ class LongDocPrompt(GeneralPrompt):
                 if sim_mat[eid, idx] > 0.8:
                     ent_map[ent].append(refer_ents[idx])
                 else:
+                    if retrieval_guaranteed:
+                        ent_map[ent].append(refer_ents[idx])
                     break
         return ent_map
     
@@ -149,20 +151,20 @@ class LongDocPrompt(GeneralPrompt):
         return [rep for rep, cnt in rep_cnt.items() if cnt >= ent_cnt_threshold]
     
     @staticmethod
-    def _ent_description_format(important_ents_0:str, important_ents_1:str):
+    def _ent_description_format(important_ents_0:str, important_ents_1:str=None):
         '''
         Generate your response using the following format:
         "{important_ents_0}: the information of {important_ents_0}
         {important_ents_1}: the information of {important_ents_1}
         ..."
         '''
-        return f'''Generate your response using the following format:\n"{important_ents_0}: the information of {important_ents_0}\n{important_ents_1}: the information of {important_ents_1}\n..."'''
+        return f'''Generate your response using the following format:\n"{important_ents_0}: the information of {important_ents_0}\n{important_ents_1}: the information of {important_ents_1}\n..."''' if important_ents_1 is not None else f'''Generate your response using the following format:\n"{important_ents_0}: the information of {important_ents_0}\n..."'''
 
     @staticmethod
     def parse_ent_description(response:str, important_ents:List[str]):
         description_dict:Dict[str, str] = {}
         for line in response.splitlines():
-            if ':' in line:
+            if ': ' in line:
                 ent, description = line.split(': ', 1)
                 ent = ent.strip()
                 if '.' in ent and ent[:ent.index('.')].isnumeric():
@@ -255,7 +257,7 @@ class LongDocPrompt(GeneralPrompt):
         {_ent_description_format}
         '''
         important_ents_str = '\n'.join(important_ents)
-        return f'''\n{LongDocPrompt._context_format(passage)}\n\nBased on the above passage, briefly and truthfully describe the information of each following entity:\n{important_ents_str}\n\n{LongDocPrompt._ent_description_format(important_ents[0], important_ents[1])}\n'''
+        return f'''\n{LongDocPrompt._context_format(passage)}\n\nBased on the above passage, briefly and truthfully describe the information of each following entity:\n{important_ents_str}\n\n{LongDocPrompt._ent_description_format(important_ents[0], important_ents[1] if len(important_ents) > 1 else None)}\n'''
     
     @staticmethod
     def ent_description_w_note(recap, passage, important_ents:List[str]):
@@ -270,7 +272,7 @@ class LongDocPrompt(GeneralPrompt):
         {_ent_description_format}
         '''
         important_ents_str = '\n'.join(important_ents)
-        return f'''\n{LongDocPrompt._context_w_note_format(recap, passage)}\n\nAbove is a recap of several previous passages and the current passage.\nMake use of the recap information to help you better understand the current passage.\nBased on the recap and the current passage, briefly and truthfully describe the information of each following entity in the current passage:\n{important_ents_str}\n\n{LongDocPrompt._ent_description_format(important_ents[0], important_ents[1])}\n'''
+        return f'''\n{LongDocPrompt._context_w_note_format(recap, passage)}\n\nAbove is a recap of several previous passages and the current passage.\nMake use of the recap information to help you better understand the current passage.\nBased on the recap and the current passage, briefly and truthfully describe the information of each following entity in the current passage:\n{important_ents_str}\n\n{LongDocPrompt._ent_description_format(important_ents[0], important_ents[1] if len(important_ents) > 1 else None)}\n'''
 
     @staticmethod
     def relation_description(passage, important_ents:List[str]):
@@ -319,13 +321,13 @@ class LongDocPrompt(GeneralPrompt):
         return f"""\nGiven the recap of several previous passages and the current passage, please shorten the current passage.\nMake use of the recap information to help you better understand the current passage.\nJust give me a shortened version. DO NOT explain your reason.\n\n{LongDocPrompt._context_w_note_format(recap, passage)}\n"""
 
     @staticmethod
-    def embed_w_note(recap:str):
+    def embed_w_note(recap:str, doc_type:str):
         """
-        Use the recap of several previous passages to help you understand the current passage.
+        Use the recap of several previous passages to help you understand the current {doc_type}.
 
         Recap:
         {recap}
         
-        Current Passage:
+        Current {doc_type.capitalize()}:
         """
-        return f"""\nUse the recap of several previous passages to help you understand the current passage.\n\nRecap:\n{recap}\n\nCurrent Passage:\n"""
+        return f"""\nUse the recap of several previous passages to help you understand the current {doc_type}.\n\nRecap:\n{recap}\n\nCurrent {doc_type.capitalize()}:\n"""

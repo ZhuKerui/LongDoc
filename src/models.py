@@ -6,7 +6,19 @@ import concurrent.futures
 
 from .base import *
 
-
+def hidden_states_wo_instruction(input_ids:List[np.ndarray], hidden_states:np.ndarray, attention_masks:np.ndarray, instruction_masks:np.ndarray, normalized:bool=True):
+    for iid, instruction_mask in enumerate(instruction_masks):
+        attention_masks[iid, :sum(instruction_mask)-1] = 0
+    input_ids = [input_id[mask>0] for input_id, mask in zip(input_ids, attention_masks)]
+    s = np.sum(hidden_states * np.expand_dims(attention_masks, -1), axis=1)
+    d = attention_masks.sum(axis=1, keepdims=True)
+    embeddings = s / d
+    temp_hidden_states:List[np.ndarray] = [hs[mask>0] for hs, mask in zip(hidden_states, attention_masks)]
+    if normalized:
+        temp_hidden_states = [lhs / np.linalg.norm(emb) for lhs, emb in zip(temp_hidden_states, embeddings)]
+        embeddings = np.vstack([emb / np.linalg.norm(emb) for emb in embeddings])
+    return input_ids, embeddings, temp_hidden_states
+    
 class GritLM(torch.nn.Module):
     def __init__(
         self,
@@ -110,8 +122,7 @@ class GritLM(torch.nn.Module):
     ) -> np.ndarray:
         assert len(sentences) == len(instructions) or not instructions
         if not instructions:
-            instructions = [''] * len(sentences)
-        instructions = [self.gritlm_instruction(instruction) for instruction in instructions]
+            instructions = [self.gritlm_instruction('')] * len(sentences)
         if self.num_gpus > 1:
             batch_size *= self.num_gpus
 
@@ -160,19 +171,21 @@ class GritLM(torch.nn.Module):
                     inputs['attention_mask'][iid, :sum(instruction_mask)] = 0
             input_ids.extend([input_id[mask>0].cpu().numpy() for input_id, mask in zip(inputs['input_ids'], inputs['attention_mask'])])
             last_hidden_state = last_hidden_state.to(inputs['attention_mask'].device)
-            last_hidden_states.extend([lhs[mask>0].cpu().to(torch.float32).numpy() for lhs, mask in zip(last_hidden_state, inputs['attention_mask'])])
+            temp_last_hidden_states = [lhs[mask>0].cpu().to(torch.float32).numpy() for lhs, mask in zip(last_hidden_state, inputs['attention_mask'])]
             embeddings = self.pooling(last_hidden_state, inputs['attention_mask'], recast=recast)
             # Normalize can change the dtype (https://discuss.pytorch.org/t/tensor-in-float16-is-transformed-into-float32-after-torch-norm/110891)
             if self.normalized: 
                 in_dtype = embeddings.dtype
-                last_hidden_states = [lhs / torch.norm(emb).item() for lhs, emb in zip(last_hidden_states, embeddings)]
+                temp_last_hidden_states = [lhs / torch.norm(emb).item() for lhs, emb in zip(temp_last_hidden_states, embeddings)]
                 embeddings = torch.nn.functional.normalize(embeddings, dim=-1).to(in_dtype)
             embeddings = cast(torch.Tensor, embeddings)
             if convert_to_tensor:
                 all_embeddings.append(embeddings)
+                last_hidden_states.extend(temp_last_hidden_states)
             else:
                 # NumPy does not support bfloat16
                 all_embeddings.append(embeddings.cpu().to(torch.float32).numpy())
+                last_hidden_states.extend(temp_last_hidden_states)
 
         all_embeddings = (
             torch.cat(all_embeddings, dim=0) if convert_to_tensor else np.concatenate(all_embeddings, axis=0)
@@ -230,6 +243,7 @@ class GritLM(torch.nn.Module):
 class LLM:
     def __init__(self, llm_name:str="mistralai/Mistral-7B-Instruct-v0.2", device_map:str='auto', batch_size:int=3) -> None:
         self.generator = pipeline("text-generation", llm_name, device_map=device_map, batch_size=batch_size)
+        self.generator.tokenizer.pad_token_id = self.generator.tokenizer.eos_token_id
         
     def __call__(self, prompt:str | List[str], n:int=1, temperature:float=0.0) -> List[List[str]]:
         config = GenerationConfig(
@@ -296,7 +310,7 @@ class LLMServer:
 
 
 class RetrieverOutput:
-    def __init__(self, embeddings:np.ndarray, last_hidden_states:List[np.ndarray]=None, retriever_input:BatchEncoding=None) -> None:
+    def __init__(self, embeddings:np.ndarray, last_hidden_states:np.ndarray=None, retriever_input:BatchEncoding=None) -> None:
         self.embeddings = embeddings
         self.input_ids:np.ndarray
         self.attention_mask:np.ndarray
@@ -307,7 +321,7 @@ class RetrieverOutput:
         
         
 class Retriever:
-    def __init__(self, retriever_name:str='facebook/contriever', device='cpu') -> None:
+    def __init__(self, retriever_name:str='intfloat/multilingual-e5-large', device='cpu') -> None:
         self.retriever_tokenizer = AutoTokenizer.from_pretrained(retriever_name)
         self.retriever_model = AutoModel.from_pretrained(retriever_name)
         if device == 'cpu':
@@ -329,11 +343,11 @@ class Retriever:
         with torch.no_grad():
             retriever_output = self.retriever_model(**retriever_input)
             paragraph_embeddings:np.ndarray = self._mean_pooling(retriever_output[0], retriever_input['attention_mask']).cpu().numpy()
-            last_hidden_states = [lhs[mask>0].cpu().numpy() for lhs, mask in zip(retriever_output[0], retriever_input['attention_mask'])]
+            last_hidden_states = retriever_output[0].cpu().numpy()
         if normalize:
             norms = np.linalg.norm(paragraph_embeddings, axis=1)
             paragraph_embeddings = paragraph_embeddings / np.expand_dims(norms, axis=1)
-            last_hidden_states = [lhs / n for lhs, n in zip(last_hidden_states, norms)]
+            # last_hidden_states = [lhs / n for lhs, n in zip(last_hidden_states, norms)]
         if complete_return:
             return RetrieverOutput(paragraph_embeddings, last_hidden_states, retriever_input)
         return paragraph_embeddings
