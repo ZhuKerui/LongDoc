@@ -343,11 +343,11 @@ class Retriever:
         with torch.no_grad():
             retriever_output = self.retriever_model(**retriever_input)
             paragraph_embeddings:np.ndarray = self._mean_pooling(retriever_output[0], retriever_input['attention_mask']).cpu().numpy()
-            last_hidden_states = retriever_output[0].cpu().numpy()
+            last_hidden_states = retriever_output[0].masked_fill(~retriever_input['attention_mask'][..., None].bool(), 0.).cpu().numpy()
         if normalize:
             norms = np.linalg.norm(paragraph_embeddings, axis=1)
             paragraph_embeddings = paragraph_embeddings / np.expand_dims(norms, axis=1)
-            # last_hidden_states = [lhs / n for lhs, n in zip(last_hidden_states, norms)]
+            last_hidden_states = last_hidden_states / np.expand_dims(norms, axis=(1, 2))
         if complete_return:
             return RetrieverOutput(paragraph_embeddings, last_hidden_states, retriever_input)
         return paragraph_embeddings

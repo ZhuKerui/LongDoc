@@ -266,7 +266,13 @@ class LongDocPrompt(GeneralPrompt):
 
         Above is a recap of several previous passages and the current passage.
         Make use of the recap information to help you better understand the current passage.
-        Based on the recap and the current passage, briefly and truthfully describe the information of each following entity in the current passage:
+        You are given a list of entities mentioned in the current passage.
+        For each entity:
+        1. if it is not mentioned in the recap, briefly and truthfully generate an entity description for it, which should include its basic information and general background in the current passage.
+        2. if it is mentioned in the recap, but the entity description is out-dated or faulty, update the entity description with new information in current passage. 
+        3. otherwise, skip this entity in your response.
+        
+        Entities in Current Passage:
         {important_ents_str}
 
         {_ent_description_format}
