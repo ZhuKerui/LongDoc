@@ -1,4 +1,4 @@
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=2
 # MODEL=meta-llama/Llama-2-7b-chat-hf
 MODEL=mistralai/Mistral-7B-Instruct-v0.2
 

@@ -10,21 +10,23 @@ from src.index_files import ReadingAgent, LongDoc, DocSplit
 
 # llm = LLM(device_map='cuda:1')
 llm = "mistralai/Mistral-7B-Instruct-v0.2"
-retriever = Retriever(device='cuda:1')
+# llm = None
+retriever = Retriever(device='cuda:2')
 
 # dataset = NarrativeQADataset()
 # dataset = LooGlEDataset()
 dataset = QualityDataset(llm, split='dev')
 # dataset = MuSiQueDataset()
 
-reading_agent = ReadingAgent(dataset, llm)
+if sys.argv[1] == 'gist':
+    reading_agent = ReadingAgent(dataset, llm)
 longdoc = LongDoc(retriever, llm)
 doc_split = DocSplit('intfloat/multilingual-e5-large')
 
-start =0
-end = 20
+start = 3
+end = 10
 w_note = True
-r_num = 2
+r_num = 1
 match_num = 2
 
 import sys
@@ -35,7 +37,7 @@ for eid in range(start, end):
     if sys.argv[1] == 'page':
         if not os.path.exists(page_file):
             # write_json(page_file, dataset.pagination(dataset.get_article(dataset.data[eid]), verbose=False))
-            write_json(page_file, doc_split.split_paragraphs(dataset.get_article(dataset.data[eid]), 512))
+            write_json(page_file, doc_split.split_paragraphs(dataset.get_article(dataset.data[eid]), 500))
         
     else:
         if os.path.exists(page_file):
