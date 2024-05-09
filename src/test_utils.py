@@ -5,19 +5,6 @@ from typing import List, Tuple
 from nltk import sent_tokenize, word_tokenize
 import seaborn as sb
 
-def split_sents(retriever_tokenizer:AutoTokenizer, p_input_ids:np.ndarray, is_contriever:bool):
-    sents = sent_tokenize(retriever_tokenizer.decode(p_input_ids[1:-1] if is_contriever else p_input_ids))
-    sent_lens = [len(retriever_tokenizer.encode(sent)) - 2 for sent in sents]
-    sent_start = 1 if is_contriever else 0
-    sent_spans = []
-    for sid in range(len(sents)):
-        sent_end = sent_start + sent_lens[sid]
-        while len(retriever_tokenizer.decode(p_input_ids[sent_start:sent_end]).strip()) < len(sents[sid]):
-            sent_end += 1
-        sent_spans.append((sent_start, sent_end))
-        sent_start = sent_end
-    return sent_spans
-
 def important_page_tokens(retriever_tokenizer:AutoTokenizer, question:str, pages, q_lhs:np.ndarray, q_input_ids:np.ndarray, q_emb, p_lhs, p_input_ids, pids, scores):
     print(question)
     for i in range(q_lhs.shape[0]):
@@ -87,20 +74,11 @@ def query_distribution(q_strs:List[str], q_lhs:np.ndarray, p_lhs, top_k:int=None
     sb.heatmap(np.vstack(ys).T, yticklabels=q_strs)
     plt.show()
         
-def query_indicator_sents(retriever_tokenizer:AutoTokenizer, pages, q_lhs:np.ndarray, q_input_ids:np.ndarray, p_lhs, p_input_ids, test_pid, test_q_token_id:int, is_contriever:bool):
-    print(retriever_tokenizer.decode(q_input_ids[test_q_token_id]), '\n')
-    print(pages[test_pid], '\n')
-    sent_spans = split_sents(retriever_tokenizer, p_input_ids[test_pid], is_contriever)
-    scores = p_lhs[test_pid].dot(q_lhs[test_q_token_id])
-    sent_scores = [(scores[sent_span[0]:sent_span[1]].mean(), retriever_tokenizer.decode(p_input_ids[test_pid][sent_span[0]:sent_span[1]])) for sent_span in sent_spans]
-    sent_scores.sort(key=lambda x: x[0], reverse=True)
-    for score, sent in sent_scores:
-        print(score, sent)
-        
 def decode_span(input_ids:List[int], tokenizer:AutoTokenizer, spans:List[Tuple[int, int]]):
     return [tokenizer.decode(input_ids[w_span[0] : w_span[1]]) for w_span in spans]
 
 def word_split(input_ids:List[int], tokenizer:AutoTokenizer, bos:str='', eos:str=''):
+    input_ids = [i for i in input_ids if i != tokenizer.pad_token_id]
     input_str = tokenizer.decode(input_ids)
     if bos:
         input_str = input_str[len(bos):]
@@ -108,7 +86,7 @@ def word_split(input_ids:List[int], tokenizer:AutoTokenizer, bos:str='', eos:str
     if eos:
         input_str = input_str[:-len(eos)]
         input_ids = input_ids[:-1]
-    words:List[str] = word_tokenize(input_str)
+    words = [w if w not in ['``', "''"] else '"' for w in word_tokenize(input_str)]
     wid = 0
     w_spans = []
     temp_w_span = []
@@ -116,18 +94,69 @@ def word_split(input_ids:List[int], tokenizer:AutoTokenizer, bos:str='', eos:str
     w_end = 1
     for tid, input_id in enumerate(input_ids):
         temp_w_span.append(input_id)
-        temp_str = tokenizer.decode(temp_w_span)
-        if sum([len(t) for t in temp_str.split()]) == sum([len(w) for w in words[wid:w_end]]):
+        temp_str_nw, temp_word_str_nw = ''.join(tokenizer.decode(temp_w_span).split()), ''.join(words[wid:w_end])
+        if temp_str_nw == temp_word_str_nw:
             w_spans.append([t_start, tid + 1])
             temp_w_span = []
             t_start = tid + 1
             wid = w_end
             w_end += 1
-        elif sum([len(t) for t in temp_str.split()]) > sum([len(w) for w in words[wid:w_end]]):
+        elif len(temp_str_nw) > len(temp_word_str_nw):
             w_end += 1
+    if wid != len(words):
+        w_spans.append([t_start, len(input_ids)])
     if bos:
         w_spans = [(0, 1)] + [(span[0] + 1, span[1] + 1) for span in w_spans]
     if eos:
         last_span = w_spans[-1]
         w_spans.append((last_span[1], last_span[1] + 1))
     return w_spans
+
+def sent_split(input_ids:List[int], tokenizer:AutoTokenizer, bos:str='', eos:str=''):
+    input_ids = [i for i in input_ids if i != tokenizer.pad_token_id]
+    input_str = tokenizer.decode(input_ids)
+    if bos:
+        input_str = input_str[len(bos):]
+        input_ids = input_ids[1:]
+    if eos:
+        input_str = input_str[:-len(eos)]
+        input_ids = input_ids[:-1]
+    sents:List[str] = sent_tokenize(input_str)
+    s_spans = []
+    temp_s_span = []
+    t_start = 0
+    sid = 0
+    words = []
+    for tid, input_id in enumerate(input_ids):
+        if not words:
+            words = [w if w not in ['``', "''"] else '"' for w in word_tokenize(sents[sid])]
+            sent_str = ''.join(words)
+            sent_start_str = sent_str[:20]
+            s_started = False
+            t_offset = -1
+            s_offset = -1
+        temp_s_span.append(input_id)
+        temp_str_nw = ''.join(tokenizer.decode(temp_s_span).split())
+        if not s_started:
+            overlap_num = len(set(temp_str_nw).intersection(set(sent_start_str)))
+            if overlap_num > 0:
+                for i in range(len(temp_str_nw)):
+                    if temp_str_nw[i:] in sent_start_str:
+                        t_offset = i
+                        s_offset = sent_start_str.index(temp_str_nw[t_offset:])
+                        break
+            s_started = t_offset >= 0
+            if not s_started:
+                temp_s_span = []
+            else:
+                t_start = tid
+        else:
+            if sent_str[s_offset:] in temp_str_nw:
+                s_spans.append([t_start, tid + 1])
+                words = []
+                temp_s_span = []
+                sid += 1
+    if bos:
+        s_spans = [(span[0] + 1, span[1] + 1) for span in s_spans]
+    assert len(s_spans) == len(sents)
+    return s_spans
