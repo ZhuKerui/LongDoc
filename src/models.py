@@ -3,8 +3,10 @@ from typing import cast
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer, GenerationConfig, BatchEncoding, pipeline
 from openai import OpenAI
 import concurrent.futures
+from sklearn.metrics.pairwise import paired_cosine_distances
 
 from .base import *
+from .base_utils import get_synonym_pairs
 
 def hidden_states_wo_instruction(input_ids:List[np.ndarray], hidden_states:np.ndarray, attention_masks:np.ndarray, instruction_masks:np.ndarray, normalized:bool=True):
     for iid, instruction_mask in enumerate(instruction_masks):
@@ -242,7 +244,7 @@ class GritLM(torch.nn.Module):
 
 class LLM:
     def __init__(self, llm_name:str="mistralai/Mistral-7B-Instruct-v0.2", device_map:str='auto', batch_size:int=3) -> None:
-        self.generator = pipeline("text-generation", llm_name, device_map=device_map, batch_size=batch_size)
+        self.generator = pipeline("text-generation", llm_name, device_map=device_map, batch_size=batch_size, torch_dtype=torch.float16)
         self.generator.tokenizer.pad_token_id = self.generator.tokenizer.eos_token_id
         
     def __call__(self, prompt:str | List[str], n:int=1, temperature:float=0.0) -> List[List[str]]:
@@ -321,7 +323,7 @@ class RetrieverOutput:
         
         
 class Retriever:
-    def __init__(self, retriever_name:str='intfloat/multilingual-e5-large', device='cpu') -> None:
+    def __init__(self, retriever_name:str='intfloat/multilingual-e5-large', device='cpu', syn_dist:float=None) -> None:
         self.retriever_tokenizer = AutoTokenizer.from_pretrained(retriever_name)
         self.retriever_model = AutoModel.from_pretrained(retriever_name)
         if device == 'cpu':
@@ -329,6 +331,17 @@ class Retriever:
         else:
             self.device = torch.device(device)
             self.retriever_model.cuda(device=self.device)
+        # Get synonyms boundary
+        
+        if syn_dist:
+            self.syn_dist = syn_dist
+        else:
+            synonym_pairs = get_synonym_pairs()
+            word_list1, word_list2 = zip(*synonym_pairs)
+            emb1 = self.embed_paragraphs(word_list1)
+            emb2 = self.embed_paragraphs(word_list2)
+            self.syn_dist = paired_cosine_distances(emb1, emb2).mean()
+        self.syn_similarity = 1 - self.syn_dist
         
     @staticmethod
     def _mean_pooling(token_embeddings:torch.Tensor, mask:torch.Tensor) -> torch.Tensor:

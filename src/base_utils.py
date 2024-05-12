@@ -1,5 +1,6 @@
 from rank_bm25 import BM25Okapi
 from nltk import word_tokenize
+from nltk.corpus import wordnet
 
 from .base import *
 
@@ -116,3 +117,15 @@ def log_info(log_file:str, tag:str, info):
             f_out.write(json.dumps([tag, info]))
             f_out.write('\n')
     
+
+def get_synonym_pairs() -> List[Tuple[str, str]]:
+    nouns = set()
+    for noun in wordnet.all_synsets(wordnet.NOUN):
+        nouns.update(noun.lemma_names())
+    pairs = set()
+    for noun in nouns:
+        synonyms = {synset.name().split('.')[0].replace('_', ' ') : synset for synset in wordnet.synsets(noun, wordnet.NOUN)}
+        if len(synonyms) < 2:
+            continue
+        pairs.update([frozenset((w1, w2)) for w1, w2 in itertools.combinations(synonyms.keys(), 2) if synonyms[w1].wup_similarity(synonyms[w2]) > 0.8])
+    return [tuple(pair) for pair in pairs]

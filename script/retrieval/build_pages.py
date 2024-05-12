@@ -8,10 +8,13 @@ from src.data import QualityDataset, NarrativeQADataset, LooGlEDataset, MuSiQueD
 from src.models import LLMServer, Retriever, LLM
 from src.index_files import ReadingAgent, LongDoc, DocSplit
 
-# llm = LLM(device_map='cuda:1')
-llm = "mistralai/Mistral-7B-Instruct-v0.2"
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_flash_sdp(False)
+
+llm = LLM()
+# llm = "mistralai/Mistral-7B-Instruct-v0.2"
 # llm = None
-retriever = Retriever(device='cuda:2')
+retriever = Retriever(syn_dist=0.1)
 
 # dataset = NarrativeQADataset()
 # dataset = LooGlEDataset()
@@ -23,11 +26,11 @@ if sys.argv[1] == 'gist':
 longdoc = LongDoc(retriever, llm)
 doc_split = DocSplit('intfloat/multilingual-e5-large')
 
-start = 3
-end = 10
+start = 2
+end = 3
 w_note = True
 r_num = 1
-match_num = 2
+match_num = 1
 
 import sys
 
@@ -37,7 +40,7 @@ for eid in range(start, end):
     if sys.argv[1] == 'page':
         if not os.path.exists(page_file):
             # write_json(page_file, dataset.pagination(dataset.get_article(dataset.data[eid]), verbose=False))
-            write_json(page_file, doc_split.split_paragraphs(dataset.get_article(dataset.data[eid]), 500))
+            write_json(page_file, doc_split.split_paragraphs(dataset.get_article(dataset.data[eid]), 512 // 2))
         
     else:
         if os.path.exists(page_file):

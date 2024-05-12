@@ -240,7 +240,7 @@ class LongDoc:
         all_ents = list(ent2pids.keys())
         target_ents_emb:np.ndarray = self.retriever.embed_paragraphs(target_ents, True)
         refer_ents_emb:np.ndarray = self.retriever.embed_paragraphs(all_ents, True)
-        ent_map = LongDocPrompt.match_entities(target_ents, all_ents, target_ents_emb, refer_ents_emb, match_num, retrieval_guaranteed)
+        ent_map = LongDocPrompt.match_entities(target_ents, all_ents, target_ents_emb, refer_ents_emb, match_num, retrieval_guaranteed, self.retriever.syn_similarity)
         prev_ent_descriptions:Dict[int, Dict[str, str]] = defaultdict(dict)
         for _, mentions in ent_map.items():
             for mention in mentions:
@@ -249,7 +249,7 @@ class LongDoc:
         prev_relation_descriptions:Dict[int, List[Tuple[List[str], str]]] = defaultdict(list)
         all_nodes = list(relation_graph.nodes)
         refer_ents_emb:np.ndarray = self.retriever.embed_paragraphs(all_nodes, True)
-        node_map = LongDocPrompt.match_entities(target_ents, all_nodes, target_ents_emb, refer_ents_emb, match_num, retrieval_guaranteed)
+        node_map = LongDocPrompt.match_entities(target_ents, all_nodes, target_ents_emb, refer_ents_emb, match_num, retrieval_guaranteed, self.retriever.syn_similarity)
         sub_nodes = set()
         for ent, mentions in node_map.items():
             sub_nodes.update(mentions)
@@ -302,7 +302,10 @@ class LongDoc:
             else:
                 updated_spans.append(span)
         updated_spans = [span for span in updated_spans if any([t.pos_ in ['NOUN', 'PROPN'] for t in doc[span[0]:span[1]]])]
+        updated_spans = [span if doc[span[0]].pos_ != 'PRON' else (span[0]+1, span[1]) for span in updated_spans]
         ent_candidates = [doc[span[0]:span[1]].text if (span[1] - span[0]) > 1 else doc[span[0]].lemma_ for span in updated_spans]
+        ent_candidates = [ent.strip('"') for ent in ent_candidates]
+        ent_candidates = [ent for ent in ent_candidates if len(ent) >= 2]
         return ent_candidates
     
     def collect_global_entities(self, paragraphs:List[str]):
@@ -314,7 +317,7 @@ class LongDoc:
             ent_candidates_pid.extend([pid] * len(ent_candidates))
         ent_candidates_all_emb = self.retriever.embed_paragraphs(ent_candidates_all)
         ent_candidates_pid = np.array(ent_candidates_pid)
-        db = DBSCAN(eps=0.3, min_samples=2, metric="cosine").fit(ent_candidates_all_emb)
+        db = DBSCAN(eps=self.retriever.syn_dist, min_samples=2, metric="cosine").fit(ent_candidates_all_emb)
         ent_class = defaultdict(set)
         for class_id in range(db.labels_.max() + 1):
             if len(set(ent_candidates_pid[db.labels_ == class_id])) >= 2:
@@ -344,7 +347,7 @@ class LongDoc:
                     list_entity_prompt = LongDocPrompt.list_entity(paragraph)
                 # Extract important entities
                 chat_response = self.llm_server(list_entity_prompt, 5, 0.7)[0]
-                important_ents = LongDocPrompt.parse_entities(chat_response, lambda x: self.retriever.embed_paragraphs(x, True))
+                important_ents = LongDocPrompt.parse_entities(chat_response, lambda x: self.retriever.embed_paragraphs(x, True), self.retriever.syn_similarity)
             else:
                 important_ents = ent_candidates_per_passage[cur_pid]
             chunk_info.important_ents = list(important_ents)

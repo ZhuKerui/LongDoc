@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 from typing import List, Tuple
 from nltk import sent_tokenize, word_tokenize
 import seaborn as sb
+from sklearn.manifold import TSNE
+import pandas as pd
 
 def important_page_tokens(retriever_tokenizer:AutoTokenizer, question:str, pages, q_lhs:np.ndarray, q_input_ids:np.ndarray, q_emb, p_lhs, p_input_ids, pids, scores):
     print(question)
@@ -20,7 +22,7 @@ def important_page_tokens(retriever_tokenizer:AutoTokenizer, question:str, pages
             print(token_scores[idx], f'<{retriever_tokenizer.decode(p_input_ids[pid][max(0, idx - 1): idx + 1])}>', retriever_tokenizer.decode(p_input_ids[pid][max(0, idx - 5): idx + 5]))
         print('\n\n')
 
-def merge_words_and_embeddings(retriever_tokenizer:AutoTokenizer, input_ids:np.ndarray, lhs:np.ndarray, word_spans:List[Tuple[int, int]], verbose:bool=True):
+def merge_words_and_embeddings(retriever_tokenizer:AutoTokenizer, input_ids:np.ndarray, lhs:np.ndarray, word_spans:List[Tuple[int, int]], verbose:bool=True, indexed:bool=True):
     strs:List[str] = []
     if word_spans:
         new_lhs = []
@@ -30,14 +32,14 @@ def merge_words_and_embeddings(retriever_tokenizer:AutoTokenizer, input_ids:np.n
             token = retriever_tokenizer.decode(input_ids[span[0] : span[1]])
             if verbose:
                 print(token, np.linalg.norm(span_lhs))
-            strs.append(f'{token}_{sid}')
+            strs.append(f'{token}_{sid}' if indexed else token)
         lhs = np.vstack(new_lhs)
     else:
         for tid, t in enumerate(input_ids):
             token = retriever_tokenizer.decode(t)
             if verbose:
                 print(token, np.linalg.norm(lhs[tid]))
-            strs.append(f'{token}_{tid}')
+            strs.append(f'{token}_{tid}' if indexed else token)
     return strs, lhs
             
 def query_indicatiors(question:str, pages, q_strs:List[str], q_lhs:np.ndarray, p_lhs, p_strs:List[List[str]], pids, scores, top_k:int=None):
@@ -160,3 +162,10 @@ def sent_split(input_ids:List[int], tokenizer:AutoTokenizer, bos:str='', eos:str
         s_spans = [(span[0] + 1, span[1] + 1) for span in s_spans]
     assert len(s_spans) == len(sents)
     return s_spans
+
+def tsne_plot(embeddings:np.ndarray, perplexity=4):
+    X_embedded = TSNE(n_components=2, learning_rate='auto', init='random', perplexity=perplexity).fit_transform(embeddings)
+    df = pd.DataFrame(X_embedded, columns=['x', 'y'])
+    ax = sb.scatterplot(df, x='x', y='y')
+    for pid, (x, y) in enumerate(X_embedded):
+        ax.text(x+0.01, y, str(pid))

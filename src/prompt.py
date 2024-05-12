@@ -110,12 +110,12 @@ class LongDocPrompt(GeneralPrompt):
         return '''Generate your response in the following format:\n"Important entities:\n1. Entity 1\n2. Entity 2\n3. Entity 3\n..."'''
     
     @staticmethod
-    def match_entities(target_ents:List[str], refer_ents:List[str], target_ents_emb:np.ndarray, refer_ents_emb:np.ndarray, top_k:int=1, retrieval_guaranteed:bool=False):
+    def match_entities(target_ents:List[str], refer_ents:List[str], target_ents_emb:np.ndarray, refer_ents_emb:np.ndarray, top_k:int=1, retrieval_guaranteed:bool=False, simlarity_threhold:float=0.8):
         sim_mat:np.ndarray = np.matmul(target_ents_emb, refer_ents_emb.T)
         ent_map:Dict[str, List[str]] = defaultdict(list)
         for eid, ent in enumerate(target_ents):
             for idx in np.argsort(sim_mat[eid])[::-1][:top_k]:
-                if sim_mat[eid, idx] > 0.8:
+                if sim_mat[eid, idx] > simlarity_threhold:
                     ent_map[ent].append(refer_ents[idx])
                 else:
                     if retrieval_guaranteed:
@@ -124,7 +124,7 @@ class LongDocPrompt(GeneralPrompt):
         return ent_map
     
     @staticmethod
-    def parse_entities(responses:List[str], encoder:Callable):
+    def parse_entities(responses:List[str], encoder:Callable, simlarity_threhold:float):
         ent_lists:List[str] = []
         ent_cnt = Counter()
         ent_cnt_threshold = len(responses) // 2 + 1
@@ -141,7 +141,7 @@ class LongDocPrompt(GeneralPrompt):
         for list1, list2 in itertools.combinations(ent_lists, 2):
             target_ents_emb:np.ndarray = encoder(list1)
             refer_ents_emb:np.ndarray = encoder(list2)
-            g.add_edges_from([(e1, e2[0]) for e1, e2 in LongDocPrompt.match_entities(list1, list2, target_ents_emb, refer_ents_emb).items()])
+            g.add_edges_from([(e1, e2[0]) for e1, e2 in LongDocPrompt.match_entities(list1, list2, target_ents_emb, refer_ents_emb, simlarity_threhold=simlarity_threhold).items()])
         ent_cluster:Set[str]
         rep_cnt:Dict[str, int] = {}
         for ent_cluster in nx.connected_components(g):
