@@ -324,8 +324,8 @@ class RetrieverOutput:
         
 class Retriever:
     def __init__(self, retriever_name:str='intfloat/multilingual-e5-large', device='cpu', syn_dist:float=None) -> None:
-        self.retriever_tokenizer = AutoTokenizer.from_pretrained(retriever_name)
-        self.retriever_model = AutoModel.from_pretrained(retriever_name)
+        self.retriever_tokenizer = AutoTokenizer.from_pretrained(retriever_name)#, force_download=True)
+        self.retriever_model = AutoModel.from_pretrained(retriever_name)#, force_download=True)
         if device == 'cpu':
             self.device = None
         else:

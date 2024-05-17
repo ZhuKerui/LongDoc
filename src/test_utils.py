@@ -164,8 +164,36 @@ def sent_split(input_ids:List[int], tokenizer:AutoTokenizer, bos:str='', eos:str
     return s_spans
 
 def tsne_plot(embeddings:np.ndarray, perplexity=4):
-    X_embedded = TSNE(n_components=2, learning_rate='auto', init='random', perplexity=perplexity).fit_transform(embeddings)
+    X_embedded = TSNE(n_components=2, learning_rate='auto', init='random', perplexity=perplexity, metric='cosine').fit_transform(embeddings)
     df = pd.DataFrame(X_embedded, columns=['x', 'y'])
     ax = sb.scatterplot(df, x='x', y='y')
     for pid, (x, y) in enumerate(X_embedded):
         ax.text(x+0.01, y, str(pid))
+
+def print_input_ids(p_strs:List[List[str]], iids:List[int]):
+    for iid in iids:
+        print(iid, ' '.join(p_strs[iid]))
+        
+def print_pages(pages:List[str], iids:List[int]):
+    for iid in iids:
+        print(iid, pages[iid])
+        
+def plot_score_matrix(retriever_tokenizer:AutoTokenizer, x_input_ids:np.ndarray, x_lhs:np.ndarray, x_word_spans:List[Tuple[int, int]], y_input_ids:np.ndarray, y_lhs:np.ndarray, y_word_spans:List[Tuple[int, int]], indexed:bool=True, worded:bool=True):
+    x_norm, y_norm = np.linalg.norm(x_lhs.mean(0)), np.linalg.norm(y_lhs.mean(0))
+    x_lhs = x_lhs / x_norm
+    y_lhs = y_lhs / y_norm
+    token_score_mat = y_lhs @ x_lhs.T
+    if not x_word_spans:
+        x_word_spans = list(zip(range(len(x_input_ids)), range(1, len(x_input_ids)+1)))
+    if not y_word_spans:
+        y_word_spans = list(zip(range(len(y_input_ids)), range(1, len(y_input_ids)+1)))
+    score_mat = np.zeros((len(y_word_spans), len(x_word_spans)))
+    x_strs = [retriever_tokenizer.decode(x_input_ids[span[0] : span[1]]) + (f'_{sid}' if indexed else '') for sid, span in enumerate(x_word_spans)]
+    y_strs = [retriever_tokenizer.decode(y_input_ids[span[0] : span[1]]) + (f'_{sid}' if indexed else '') for sid, span in enumerate(y_word_spans)]
+    print('x:', x_strs)
+    print('y:', y_strs)
+    for xid, x_span in enumerate(x_word_spans):
+        for yid, y_span in enumerate(y_word_spans):
+            score_mat[yid, xid] = token_score_mat[y_span[0]:y_span[1], x_span[0]:x_span[1]].mean()
+    fig, ax = plt.subplots(figsize=(score_mat.shape[1], score_mat.shape[0]))
+    sb.heatmap(score_mat, xticklabels=range(score_mat.shape[1]) if not worded else x_strs, yticklabels=range(score_mat.shape[0]) if not worded else y_strs, annot=True, ax=ax)

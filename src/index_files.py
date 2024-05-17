@@ -46,9 +46,8 @@ class DocSplit:
         'samsum': (split_samsum, '\n'), 
     }
     
-    def __init__(self, llm_name:str) -> None:
-        self.llm_name = llm_name
-        self.llm_tokenizer = AutoTokenizer.from_pretrained(self.llm_name)
+    def __init__(self, tokenizer:AutoTokenizer) -> None:
+        self.llm_tokenizer = tokenizer
         
     def _append_paragraph(self, paragraphs:list, tokenized_p:List[int]):
         paragraph = self.llm_tokenizer.decode(tokenized_p)
@@ -391,6 +390,29 @@ class LongDoc:
                         temp_pids.append(cur_pid)
         return relation_graph
     
+def slide_encode(pages:List[str], retriever:Retriever, window_size:int=3):
+    padded_pages = ([''] * (window_size-1)) + pages + ([''] * (window_size-1))
+    p_input_ids = [retriever.retriever_tokenizer(p)['input_ids'][1:-1] for p in pages]
+    batched_pids = [[pid_ - window_size + 1 for pid_ in range(pid, pid + window_size) if padded_pages[pid_]] for pid in range(len(padded_pages) - window_size + 1)]
+    reformed_pages = [' '.join([pages[pid] for pid in pids]) for pids in batched_pids]
+    p_emb = retriever.embed_paragraphs(reformed_pages, complete_return=True)
+    pid2embs = [[] for p in pages]
+    pid2lhs = [[] for p in pages]
+    for temp_input_ids, temp_lhs, pids in zip(p_emb.input_ids, p_emb.last_hidden_states, batched_pids):
+        p_start = 1
+        for pid in pids:
+            p_len = len(p_input_ids[pid])
+            p_end = p_start + p_len
+            if temp_input_ids[p_start:p_end].tolist() != p_input_ids[pid]: # align check
+                print('fail')
+                break
+            pid2lhs[pid].append(temp_lhs[p_start:p_end])
+            pid2embs[pid].append(temp_lhs[p_start:p_end].mean(0))
+            p_start = p_end
+    pid2embs = [np.vstack(embs) for embs in pid2embs]
+    pid2lhs = [np.concatenate(np.expand_dims(lhs, 0), 0) for lhs in pid2lhs]
+    return p_input_ids, pid2embs, pid2lhs
+
 if __name__ == '__main__':
     
     import argparse
