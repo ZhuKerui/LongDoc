@@ -130,11 +130,12 @@ class LongDocPrompt(GeneralPrompt):
         ent_cnt_threshold = len(responses) // 2 + 1
         for response in responses:
             i = 1
-            temp_ents = []
+            temp_ents:List[str] = []
             for line in response.splitlines():
                 if line.startswith(f'{i}. '):
-                    temp_ents.append(line.split(' ', 1)[1].strip().strip('.').capitalize())
+                    temp_ents.append(line.split(' ', 1)[1].strip().strip('.'))
                     i += 1
+            temp_ents = [s[0].upper() + s[1:] for s in temp_ents]
             ent_lists.append(temp_ents)
             ent_cnt.update(temp_ents)
         g = nx.Graph()
