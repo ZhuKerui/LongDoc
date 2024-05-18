@@ -12,10 +12,10 @@ torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_flash_sdp(False)
 
 # gritlm = GritLM("GritLM/GritLM-7B", device_map="cuda:2", torch_dtype="auto")
-retriever = Retriever(device='cpu', syn_dist=0.1)
+retriever = Retriever(device='cuda:2', syn_dist=0.1)
 doc_split = DocSplit(retriever.retriever_tokenizer)
-llm = LLM()
-# llm = 'mistralai/Mistral-7B-Instruct-v0.2'
+# llm = LLM()
+llm = 'mistralai/Mistral-7B-Instruct-v0.2'
 # llm = None
 longdoc = LongDoc(retriever, llm)
 # dataset = NarrativeQADataset(llm)
