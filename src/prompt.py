@@ -133,7 +133,7 @@ class LongDocPrompt(GeneralPrompt):
             temp_ents = []
             for line in response.splitlines():
                 if line.startswith(f'{i}. '):
-                    temp_ents.append(line.split(' ', 1)[1].strip().strip('.'))
+                    temp_ents.append(line.split(' ', 1)[1].strip().strip('.').capitalize())
                     i += 1
             ent_lists.append(temp_ents)
             ent_cnt.update(temp_ents)
