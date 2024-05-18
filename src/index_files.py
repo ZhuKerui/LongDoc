@@ -378,6 +378,41 @@ class LongDoc:
                         temp_pids.append(cur_pid)
         return results
     
+    def index_text_into_map(self, paragraphs:List[str], nbr_max_dist:int=1):
+        # Extract important entities
+        print('Collect important entities')
+        collect_start_time = time()
+        important_ents_list = [
+            LongDocPrompt.parse_entities(
+                chat_response, 
+                lambda x: self.retriever.embed_paragraphs(x, True), 
+                self.retriever.syn_similarity)
+            for chat_response in self.llm_server([LongDocPrompt.list_entity(p) for p in paragraphs], 5, 0.7)
+        ]
+        print('Collect important entities done', time() - collect_start_time)
+        
+        results = [ChunkInfo(cur_pid, paragraph, important_ents=important_ents) for cur_pid, (paragraph, important_ents) in enumerate(zip(paragraphs, important_ents_list))]
+        raw = {}
+        for nbr_dist in range(nbr_max_dist + 1):
+            relation_description_prompts = [
+                LongDocPrompt.pairwise_relation_description(
+                    ' '.join(paragraphs[cur_pid - nbr_dist : cur_pid + 1]), 
+                    results[cur_pid - nbr_dist].important_ents, 
+                    results[cur_pid].important_ents
+                )
+                for cur_pid in range(nbr_dist, len(paragraphs))
+            ]
+            temp_raw = []
+            for cur_pid, relation_description in zip(range(nbr_dist, len(paragraphs)), self.llm_server(relation_description_prompts)):
+                temp_raw.append((cur_pid, relation_description[0]))
+                relation_descriptions = LongDocPrompt.parse_pairwise_relation_description(relation_description[0], results[cur_pid - nbr_dist].important_ents, results[cur_pid].important_ents)
+                if nbr_dist == 0:
+                    results[cur_pid].relation_descriptions = relation_descriptions
+                else:
+                    results[cur_pid].prev_relation_descriptions[-nbr_dist] = relation_descriptions
+            raw[nbr_dist] = temp_raw
+        return results, raw
+    
     def build_relation_graph(self, notes:List[ChunkInfo]):
         relation_graph = nx.Graph()
         for cur_pid, chunk_info in enumerate(notes):

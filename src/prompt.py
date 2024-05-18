@@ -202,6 +202,40 @@ class LongDocPrompt(GeneralPrompt):
         return relations
 
     @staticmethod
+    def _pairwise_relation_description_format():
+        '''
+        Suppose Entity 1 and 3 are from entity set one and Entity 2 and 4 are from entity set two.
+        Your response should be in the following format:
+        "1. (Entity 1, Entity 2): summary of relational information between Entity 1 and 2.
+        2. (Entity 3, Entity 4): summary of relational information between Entity 3 and 4.
+        ..."
+        '''
+        return '''Suppose Entity 1 and 3 are from entity set one and Entity 2 and 4 are from entity set two.\nYour response should be in the following format:\n"1. (Entity 1, Entity 2): summary of relational information between Entity 1 and 2.\n2. (Entity 3, Entity 4): summary of relational information between Entity 3 and 4.\n..."'''
+    
+    @staticmethod
+    def parse_pairwise_relation_description(response:str, ent1s:List[str], ent2s:List[str]):
+        lowered_ent1s, lowered_ent2s = [e.lower() for e in ent1s], [e.lower() for e in ent2s]
+        relations:List[Tuple[List[str], str]] = []
+        for line in response.splitlines():
+            line = line.strip()
+            if ':' in line:
+                if '.' in line and line[:line.index('.')].isnumeric():
+                    line = line.split('.', 1)[1].strip()
+                line = line.strip('+* ')
+                ents, relation = line.split(':', 1)
+                relation = relation.strip()
+                if ents.count(',') != 1:
+                    continue
+                ents = ents.strip()
+                if ents.startswith('(') and ents.endswith(')'):
+                    ents = ents[1:-1].strip()
+                ent1, ent2 = ents.split(',')
+                ent1, ent2 = ent1.strip(), ent2.strip()
+                if any([lowered_ent1.startswith(ent1.lower()) for lowered_ent1 in lowered_ent1s]) and any([lowered_ent2.startswith(ent2.lower()) for lowered_ent2 in lowered_ent2s]):
+                    relations.append(([ent1, ent2], relation))
+        return relations
+
+    @staticmethod
     def _context_format(passage:str):
         '''
         Passage:
@@ -296,6 +330,25 @@ class LongDocPrompt(GeneralPrompt):
         '''
         important_ents_str = '\n'.join(important_ents)
         return f'''\n{LongDocPrompt._context_format(passage)}\n\nImportant entities:\n{important_ents_str}\n\nAbove is a passage and the important entities in the passage.\nFind the related important entity clusters and use 1 to 3 sentences to informatively summarize their relational information in the above passage.\nTry to include as many entities as possible in each cluster.\n\n{LongDocPrompt._relation_description_format()}\n'''
+
+    @staticmethod
+    def pairwise_relation_description(passage, important_ent1s:List[str], important_ent2s:List[str]):
+        '''
+        {_context_format}
+
+        Important entity set one:
+        {important_ent1s_str}
+        
+        Important entity set two:
+        {important_ent2s_str}
+
+        Above is a passage and two sets of important entities in the passage.
+        Find the related entity pairs, where each pair consists of an entity from each important entity set, and use one sentence to informatively summarize their relational information in the above passage.
+        
+        {_pairwise_relation_description_format}
+        '''
+        important_ent1s_str, important_ent2s_str = ', '.join(important_ent1s), ', '.join(important_ent2s)
+        return f'''\n{LongDocPrompt._context_format(passage)}\n\nImportant entity set one:\n{important_ent1s_str}\n\nImportant entity set two:\n{important_ent2s_str}\n\nAbove is a passage and two sets of important entities in the passage.\nFind the related entity pairs, where each pair consists of an entity from each important entity set, and use one sentence to informatively summarize their relational information in the above passage.\n\n{LongDocPrompt._pairwise_relation_description_format()}\n'''
 
     @staticmethod
     def relation_description_w_note(recap, passage, important_ents:List[str]):
