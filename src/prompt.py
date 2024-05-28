@@ -237,6 +237,65 @@ class LongDocPrompt(GeneralPrompt):
         return relations
 
     @staticmethod
+    def _chunk_wise_rewrite_format(chunk_ids:List[int]):
+        '''
+        Generate your response in the following format:
+        The summary of chunk {chunk_start}:
+        [Summary]
+        ...
+        The summary of chunk {chunk_end}:
+        [Summary]
+        '''
+        formats = '\n\n'.join([f'The summary of chunk {chunk_id + 1}:\n[Summary]' for chunk_id in chunk_ids])
+        return f'''Generate your response in the following format:\n{formats}'''
+    
+    @staticmethod
+    def parse_chunk_wise_rewrite(response:str):
+        summary_header = 'The summary of chunk '
+        header_len = len(summary_header)
+        
+        summaries = [summary[summary.lower().index(summary_header.lower()):].split(':', 1) for summary in response.split('\n\n') if summary_header.lower() in summary.lower()]
+        summaries = [summary for summary in summaries if summary[0][header_len:].isnumeric()]
+        return {int(summary[0][header_len:]) - 1 : summary[1].strip() for summary in summaries}
+    
+    @staticmethod
+    def _chunk_wise_entity_extraction_format(chunk_ids:List[int]):
+        '''
+        Generate your response in the following format:
+        Entities and keywords in chunk {chunk_start}:
+        Entity: [List of entities]
+        Keyword: [List of keywords]
+        ...
+        Entities and keywords in chunk {chunk_end}:
+        Entity: [List of entities]
+        Keyword: [List of keywords]
+        
+        If no entity or keyword, fill the [List of entities] or [List of keywords] with "No Entity" or "No Keyword".
+        '''
+        formats = '\n\n'.join([f'Entities and keywords in chunk {chunk_id + 1}:\nEntity: [List of entities]\nKeyword: [List of keywords]' for chunk_id in chunk_ids])
+        return f'''Generate your response in the following format:\n{formats}\n\nIf no entity or keyword, simply leave the [List of entities] or [List of keywords] blank.'''
+    
+    @staticmethod
+    def parse_chunk_wise_entity_extraction(response:str):
+        summary_header = 'Entities and keywords in chunk '
+        header_len = len(summary_header)
+        
+        summaries = [summary[summary.lower().index(summary_header.lower()):].split(':', 1) for summary in response.split('\n\n') if summary_header.lower() in summary.lower()]
+        summaries = [(summary[0], summary[1].strip().split('\n')) for summary in summaries if summary[0][header_len:].isnumeric() and summary[1].count('\n') in (1, 2)]
+        # summaries = [(summary[0], [ent.strip() for ent in summary[1][0].split(':')[1].split(', ')], [kw.strip() for kw in summary[1][1].split(':')[1].split(', ')]) for summary in summaries if summary[1][0].startswith('Entity:') and summary[1][1].startswith('Keyword:')]
+        return {int(summary[0][header_len:]) - 1 : summary[1:] for summary in summaries}
+
+    @staticmethod
+    def _batched_summary_format():
+        '''
+        Generate your response in the following format:
+        Summary:
+        [The summary of the current chunk ...]
+        
+        Forward Commonality:
+        [The common]
+        '''
+    @staticmethod
     def _context_format(passage:str):
         '''
         Passage:
@@ -351,6 +410,48 @@ class LongDocPrompt(GeneralPrompt):
         important_ent1s_str, important_ent2s_str = ', '.join(important_ent1s), ', '.join(important_ent2s)
         return f'''\n{LongDocPrompt._context_format(passage)}\n\nImportant entity set one:\n{important_ent1s_str}\n\nImportant entity set two:\n{important_ent2s_str}\n\nAbove is a passage and two sets of important entities in the passage.\nFind the related entity pairs, where each pair consists of an entity from each important entity set, and use one sentence to informatively summarize their relational information in the above passage.\n\n{LongDocPrompt._pairwise_relation_description_format()}\n'''
 
+    @staticmethod
+    def chunk_wise_rewrite(pages:List[str], chunk_ids:List[int]):
+        '''
+        Passage:
+        {passage}
+
+        Above is a passage splitted into {chunk_num} chunks.
+        Please summarize the chunks {chunk_ids} separately so that each summarized chunk can be understood independently. 
+        You should make use of the general context to correctly understand each chunk.
+        Each summarized chunk should be a sequence of statements in thrid-person narration, containing all the essential information in the chunk, with all the coreferences resolved.
+
+        {_chunk_wise_rewrite_format}
+        '''
+        passage = '\n'.join([f'Chunk {sid + 1}: {sent}' for sid, sent in enumerate(pages)])
+        if len(chunk_ids) == 1:
+            chunk_ids = set(chunk_ids)
+            chunk_ids.update(np.random.choice(len(pages), 2))
+            chunk_ids = list(chunk_ids)
+            chunk_ids.sort()
+        return f'''\nPassage:\n{passage}\n\nAbove is a passage splitted into {len(pages)} chunks. \nPlease summarize chunks {[cid + 1 for cid in chunk_ids]} separately so that each summarized chunk can be understood independently. \nYou should make use of the general context to correctly understand each chunk.\nEach summarized chunk should be a sequence of statements in thrid-person narration, containing all the essential information in the chunk, with all the coreferences resolved.\n\n{LongDocPrompt._chunk_wise_rewrite_format(chunk_ids)}\n'''
+    
+    @staticmethod
+    def chunk_wise_entity_extraction(pages:List[str], chunk_ids:List[int]):
+        '''
+        Chunks:
+        {passage}
+
+        Above is a list of {chunk_num} chunks summarized from consecutive passages.
+        Please find the important entities and keywords in the chunks {chunk_ids} separately.
+        You should make use of the general context to correctly understand each chunk.
+        Each entity or keyword should be a noun or noun phrase that is significant or shared by chunks.
+
+        {_chunk_wise_entity_extraction_format}
+        '''
+        passage = '\n'.join([f'Chunk {sid + 1}: {sent}' for sid, sent in enumerate(pages)])
+        if len(chunk_ids) == 1:
+            chunk_ids = set(chunk_ids)
+            chunk_ids.update(np.random.choice(len(pages), 2))
+            chunk_ids = list(chunk_ids)
+            chunk_ids.sort()
+        return f'''\nChunks:\n{passage}\n\nAbove is a list of {len(pages)} chunks summarized from consecutive passages.\nPlease find the important entities and keywords in the chunks {chunk_ids} separately.\nYou should make use of the general context to correctly understand each chunk.\nEach entity or keyword should be a noun or noun phrase that is significant or shared by chunks.\n\n{LongDocPrompt._chunk_wise_entity_extraction_format(chunk_ids)}\n'''
+    
     @staticmethod
     def relation_description_w_note(recap, passage, important_ents:List[str]):
         '''

@@ -6,6 +6,11 @@ from nltk import sent_tokenize, word_tokenize
 import seaborn as sb
 from sklearn.manifold import TSNE
 import pandas as pd
+import plotly.graph_objects as go
+from plotly.validators.scatter.marker import SymbolValidator
+
+from .base_utils import ChunkInfo
+from .models import Retriever
 
 def important_page_tokens(retriever_tokenizer:AutoTokenizer, question:str, pages, q_lhs:np.ndarray, q_input_ids:np.ndarray, q_emb, p_lhs, p_input_ids, pids, scores):
     print(question)
@@ -197,3 +202,105 @@ def plot_score_matrix(retriever_tokenizer:AutoTokenizer, x_input_ids:np.ndarray,
             score_mat[yid, xid] = token_score_mat[y_span[0]:y_span[1], x_span[0]:x_span[1]].mean()
     fig, ax = plt.subplots(figsize=(score_mat.shape[1], score_mat.shape[0]))
     sb.heatmap(score_mat, xticklabels=range(score_mat.shape[1]) if not worded else x_strs, yticklabels=range(score_mat.shape[0]) if not worded else y_strs, annot=True, ax=ax)
+
+def plot_map(results:List[ChunkInfo], queries:List[str], retriever:Retriever):
+    raw_symbols = SymbolValidator().values
+    markers = [raw_symbols[i+2] for i in range(0,len(raw_symbols),3) if '-' not in raw_symbols[i+2]]
+    width = len(results)
+    height = max([len(ci.important_ents) for ci in results])
+    node_x = []
+    node_y = []
+    nodes = []
+    node_pos = []
+    for cid, ci in enumerate(results):
+        temp_node_pos = {}
+        important_ents = ci.important_ents
+        important_ents.sort()
+        for eid, ent in enumerate(important_ents):
+            x, y = cid, (height / 2) + np.sign(eid - len(important_ents) / 2) * (np.log(np.abs(eid - len(important_ents) / 2) + 1) + np.log(cid % 3 + 1))
+            node_x.append(x)
+            node_y.append(y)
+            nodes.append((cid, ent))
+            temp_node_pos[ent] = (x, y)
+        node_pos.append(temp_node_pos)
+    ents = list(set({ent for cid, ent in nodes}))
+    ent_emb:np.ndarray = retriever.embed_paragraphs(ents, normalize=True, complete_return=False)
+    q_emb:np.ndarray = retriever.embed_paragraphs(queries, normalize=True, complete_return=False)
+    score_matrix = ent_emb @ q_emb.T
+    score_matrix[score_matrix < retriever.syn_similarity] = 0
+    ent2q = {ent : queries[scores.argmax()] for scores, ent in zip(score_matrix, ents) if scores.any()}
+    node_text = [f'{cid}_{ent}: {ent2q[ent]}' if ent in ent2q else f'{cid}_{ent}' for cid, ent in nodes]
+    node_color = [int(ent in ent2q) for cid, ent in nodes]
+    node_symbol = [markers[queries.index(ent2q[ent]) + 1 if ent in ent2q else 0] for cid, ent in nodes]
+            
+    node_trace = go.Scatter(
+        x=node_x, y=node_y, text=node_text,
+        mode='markers',
+        hoverinfo='text',
+        marker=dict(
+            showscale=True,
+            colorscale='YlGnBu',
+            reversescale=True,
+            color=node_color,
+            symbol=node_symbol,
+            size=5,
+            colorbar=dict(
+                thickness=15,
+                title='Node Connections',
+                xanchor='left',
+                titleside='right'
+            ),
+            line_width=1
+        )
+    )
+    
+    edge_x = []
+    edge_y = []
+    edge_mid_x = []
+    edge_mid_y = []
+    edge_text = []
+    for cid, ci in enumerate(results):
+        for prev_id, relation_descriptions in ci.prev_relation_descriptions.items():
+            prev_important_ents = results[cid + prev_id].important_ents
+            prev_node_pos = node_pos[cid + prev_id]
+            cur_important_ents = results[cid].important_ents
+            cur_node_pos = node_pos[cid]
+            for (ent1, ent2), relation_description in relation_descriptions:
+                ent1 = ent1[0].upper() + ent1[1:]
+                ent2 = ent2[0].upper() + ent2[1:]
+                ent1 = ent1 if ent1 in prev_important_ents else sorted([ent for ent in prev_important_ents if ent.startswith(ent1)], key=lambda x: len(x))[0]
+                ent2 = ent2 if ent2 in cur_important_ents else sorted([ent for ent in cur_important_ents if ent.startswith(ent2)], key=lambda x: len(x))[0]
+                prev_x, prev_y = prev_node_pos[ent1]
+                cur_x, cur_y = cur_node_pos[ent2]
+                edge_x.extend([prev_x, cur_x, None])
+                edge_y.extend([prev_y, cur_y, None])
+                edge_mid_x.append((prev_x + cur_x) / 2)
+                edge_mid_y.append((prev_y + cur_y) / 2)
+                edge_text.append(relation_description)
+    edge_trace = go.Scatter(
+        x=edge_x, y=edge_y,
+        line=dict(width=0.5, color='#888'),
+        hoverinfo='none',
+        mode='lines',
+        text=edge_text)
+    
+    sent_trace = go.Scatter(
+        x=edge_mid_x, y=edge_mid_y, text=edge_text,
+        mode='markers',
+        marker_size=2,
+        # textposition='top center',
+        hoverinfo='text',
+    )
+    
+    fig = go.Figure(data=[edge_trace, node_trace, sent_trace],
+                layout=go.Layout(
+                    title='<br>Network graph made with Python',
+                    titlefont_size=16,
+                    showlegend=False,
+                    hovermode='closest',
+                    margin=dict(b=20,l=5,r=5,t=40),
+                    xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                    yaxis=dict(showgrid=False, zeroline=False, showticklabels=False))
+                    )
+    fig.show()
+    

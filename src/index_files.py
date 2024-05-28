@@ -87,24 +87,28 @@ class DocSplit:
     #             splited_paragraph = tokenized_s[(chunk_size - 1) * paragraph_size:]
     #     return splited_paragraphs, splited_paragraph
         
-    def split_paragraphs(self, text:str, paragraph_size:int=300):
+    def split_paragraphs(self, text:str, max_size:int=300, keep_full_sent:bool=False):
         reformated_paragraphs:List[str] = []
         reformated_paragraph = []
-        paragraph_size -= 2 # Remove <s> and </s>
+        max_size -= 2 # Remove <s> and </s>
         
         for s in sent_tokenize(text):
             tokenized_s = self.llm_tokenizer.encode(s)[1:-1]
-            if len(tokenized_s) <= paragraph_size:
-                if len(reformated_paragraph) + len(tokenized_s) > paragraph_size:
+            if len(tokenized_s) <= max_size:
+                if len(reformated_paragraph) + len(tokenized_s) > max_size:
                     self._append_paragraph(reformated_paragraphs, reformated_paragraph)
                 reformated_paragraph.extend(tokenized_s)
             else:
-                reformated_paragraph.extend(tokenized_s)
-                p_start, p_end = 0, paragraph_size
-                while p_end <= len(reformated_paragraph):
-                    self._append_paragraph(reformated_paragraphs, tokenized_s[p_start:p_end])
-                    p_start, p_end = p_end, p_end + paragraph_size
-                reformated_paragraph = reformated_paragraph[p_start:p_end]
+                if keep_full_sent:
+                    self._append_paragraph(reformated_paragraphs, reformated_paragraph)
+                    self._append_paragraph(reformated_paragraphs, tokenized_s)
+                else:
+                    reformated_paragraph.extend(tokenized_s)
+                    p_start, p_end = 0, max_size
+                    while p_end <= len(reformated_paragraph):
+                        self._append_paragraph(reformated_paragraphs, reformated_paragraph[p_start:p_end])
+                        p_start, p_end = p_end, p_end + max_size
+                    reformated_paragraph = reformated_paragraph[p_start:p_end]
                 
         if reformated_paragraph:
             self._append_paragraph(reformated_paragraphs, reformated_paragraph)
@@ -307,7 +311,7 @@ class LongDoc:
         ent_candidates = [ent for ent in ent_candidates if len(ent) >= 2]
         return ent_candidates
     
-    def collect_global_entities(self, paragraphs:List[str]):
+    def collect_global_entities(self, paragraphs:List[str], return_ent_class:bool=False):
         ent_candidates_all = list()
         ent_candidates_pid = list()
         for pid, passage in enumerate(paragraphs):
@@ -326,7 +330,7 @@ class LongDoc:
             if label in ent_class:
                 ent_class[label].add(ent)
                 ent_candidates_per_passage[pid].add(ent)
-        return ent_candidates_per_passage
+        return ent_candidates_per_passage if not return_ent_class else (ent_candidates_per_passage, ent_class)
     
     def index_text(self, paragraphs:List[str], w_note:bool=True, match_num:int=5, r_num:int=1):
         # Collect useful entities
@@ -412,6 +416,51 @@ class LongDoc:
                     results[cur_pid].prev_relation_descriptions[-nbr_dist] = relation_descriptions
             raw[nbr_dist] = temp_raw
         return results, raw
+    
+    def lossless_index(self, pages:List[str], rewrite_chunk_num:int=5, prev_chunk_num:int=5, post_chunk_num:int=5, target:str='relation'):
+        missed_chunk_ids:List[List[int]] = []
+        batch_start_ends = []
+        summaries:List[dict] = []
+        for batch_start in range(0, len(pages), rewrite_chunk_num):
+            prev_start = max(batch_start - prev_chunk_num, 0)
+            batch_end = min(batch_start + rewrite_chunk_num, len(pages))
+            post_end = min(batch_end + post_chunk_num, len(pages))
+            chunk_start = batch_start - prev_start
+            chunk_end = batch_end - prev_start
+            chunk_ids = list(range(chunk_start, chunk_end))
+            missed_chunk_ids.append(chunk_ids)
+            batch_start_ends.append((prev_start, post_end))
+            summaries.append({})
+
+        while any(missed_chunk_ids):
+            temp_prompts = []
+            temp_summaries:List[dict] = []
+            temp_chunk_ids:List[list] = []
+            for chunk_ids, (batch_start, batch_end), summary in zip(missed_chunk_ids, batch_start_ends, summaries):
+                if chunk_ids:
+                    chunk_wise_func = LongDocPrompt.chunk_wise_rewrite if target == 'relation' else LongDocPrompt.chunk_wise_entity_extraction
+                    temp_prompts.append(chunk_wise_func(pages[batch_start:batch_end], chunk_ids))
+                    temp_summaries.append(summary)
+                    temp_chunk_ids.append(chunk_ids)
+
+            print(len(temp_prompts))
+            responses = self.llm_server(temp_prompts)
+
+            for response, chunk_ids, summary in zip(responses, temp_chunk_ids, temp_summaries):
+                chunk_wise_parse_func = LongDocPrompt.parse_chunk_wise_rewrite if target == 'relation' else LongDocPrompt.parse_chunk_wise_entity_extraction
+                new_summaries = chunk_wise_parse_func(response[0])
+                summarized_chunk_ids = [chunk_id for chunk_id in chunk_ids if chunk_id in new_summaries]
+                for chunk_id in summarized_chunk_ids:
+                    summary[chunk_id] = new_summaries[chunk_id]
+                    chunk_ids.remove(chunk_id)
+        
+        all_summary:List[str] = []
+        for summary in summaries:
+            cid_sum_pairs = list(summary.items())
+            cid_sum_pairs.sort(key=lambda x: x[0])
+            all_summary.extend([s for _, s in cid_sum_pairs])
+        
+        return all_summary
     
     def build_relation_graph(self, notes:List[ChunkInfo]):
         relation_graph = nx.Graph()
