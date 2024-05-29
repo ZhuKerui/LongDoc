@@ -307,7 +307,7 @@ class LongDocPrompt(GeneralPrompt):
         for line in response.split('\n\n'):
             line = line.strip()
             if line.startswith('Commonality:'):
-                result['b_com'] = line.split(':', 1)[1].strip()
+                result['com'] = line.split(':', 1)[1].strip()
             else:
                 if 'Unique in "Current Passage":' in line:
                     result['uic'] = line[line.index('Unique in "Current Passage":'):].split(':', 1)[1].strip()
@@ -330,6 +330,18 @@ class LongDocPrompt(GeneralPrompt):
             line = line.strip()
             if line.startswith('Summary:'):
                 return line.split(':', 1)[1].strip()
+    
+    @staticmethod
+    def _summary_eval_format():
+        '''
+        Return "Match" if the summary matches the summarized passage and return "Not Match" otherwise.
+        Do not explain your answer.
+        '''
+        return '''Return "Match" if the summary matches the summarized passage and return "Not Match" otherwise.\nDo not explain your answer.\n'''
+
+    @staticmethod
+    def parse_summary_eval(response:str):
+        return 'match' in response.lower() and 'not' not in response.lower()
     
     @staticmethod
     def _context_format(passage:str):
@@ -525,6 +537,23 @@ class LongDocPrompt(GeneralPrompt):
         '''
         return f'''\nCurrent Passage:\n{current_passage}\n\nAbove is a passage from a document, namely "Current Passage".\nPlease summarize the "Current Passage".\nThe summary should briefly describe the information in the "Current Passage".\nAll the response should be a sequence of statements in thrid-person narration with all the coreferences resolved.\n\n{LongDocPrompt._summary_format()}\n'''
         
+    @staticmethod
+    def summary_eval(passage:str, summary:str):
+        '''
+        Passage:
+        {passage}
+        
+        Summary:
+        {summary}
+        
+        Above is a passage and the corresponding summary.
+        Please evaluate whether the summary matches the passage.
+        A matched summary should truthfully summarize the information in the passage, with no additional or incorrect information.
+        
+        {_summary_eval_format}
+        '''
+        return f'''\nPassage:\n{passage}\n\nSummary:\n{summary}\n\nAbove is a passage and the corresponding summary.\nPlease evaluate whether the summary matches the passage.\nA matched summary should truthfully summarize the information in the passage, with no additional or incorrect information.\n\n{LongDocPrompt._summary_eval_format()}\n'''
+    
     @staticmethod
     def relation_description_w_note(recap, passage, important_ents:List[str]):
         '''
