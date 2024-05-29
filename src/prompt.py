@@ -286,15 +286,51 @@ class LongDocPrompt(GeneralPrompt):
         return {int(summary[0][header_len:]) - 1 : summary[1:] for summary in summaries}
 
     @staticmethod
-    def _batched_summary_format():
+    def _compare_format():
+        '''
+        Generate your response in the following format:
+        Commonality:
+        Both the "Current Passage" and the "Passage After" mention ...
+        
+        Distinction:
+        Unique in "Current Passage":
+        The "Current Passage" uniquely mentions ...
+        
+        Unique in "Passage After":
+        The "Passage After" uniquely mentions ...
+        '''
+        return '''Generate your response in the following format:\nCommonality:\nBoth the "Current Passage" and the "Passage After" mention ...\n\nDistinction:\nUnique in "Current Passage":\nThe "Current Passage" uniquely mentions ...\n\nUnique in "Passage After":\nThe "Passage After" uniquely mentions ...\n'''
+        
+    @staticmethod
+    def parse_compare(response:str):
+        result:Dict[str, str] = {}
+        for line in response.split('\n\n'):
+            line = line.strip()
+            if line.startswith('Commonality:'):
+                result['b_com'] = line.split(':', 1)[1].strip()
+            else:
+                if 'Unique in "Current Passage":' in line:
+                    result['uic'] = line[line.index('Unique in "Current Passage":'):].split(':', 1)[1].strip()
+                elif 'Unique in "Passage After":' in line:
+                    result['uia'] = line[line.index('Unique in "Passage After":'):].split(':', 1)[1].strip()
+        return result
+    
+    @staticmethod
+    def _summary_format():
         '''
         Generate your response in the following format:
         Summary:
-        [The summary of the current chunk ...]
-        
-        Forward Commonality:
-        [The common]
+        [The summary of the "Current Passage" ...]
         '''
+        return '''Generate your response in the following format:\nSummary:\n[The summary of the "Current Passage" ...]\n'''
+    
+    @staticmethod
+    def parse_summary(response:str):
+        for line in response.split('\n\n'):
+            line = line.strip()
+            if line.startswith('Summary:'):
+                return line.split(':', 1)[1].strip()
+    
     @staticmethod
     def _context_format(passage:str):
         '''
@@ -452,6 +488,43 @@ class LongDocPrompt(GeneralPrompt):
             chunk_ids.sort()
         return f'''\nChunks:\n{passage}\n\nAbove is a list of {len(pages)} chunks summarized from consecutive passages.\nPlease find the important entities and keywords in the chunks {chunk_ids} separately.\nYou should make use of the general context to correctly understand each chunk.\nEach entity or keyword should be a noun or noun phrase that is significant or shared by chunks.\n\n{LongDocPrompt._chunk_wise_entity_extraction_format(chunk_ids)}\n'''
     
+    @staticmethod
+    def compare(current_passage:str, passage_after:str):
+        '''
+        Current Passage:
+        {current_passage}
+        
+        Passage After:
+        {passage_after}
+        
+        Above are two consecutive passages from a document, namely "Current Passage" and "Passage After".
+        Please compare the shared commonalities and unshared distinctions between the "Current Passage" and the "Passage After".
+        You should make use of the general context to correctly understand each passage.
+        The commonality should briefly describe the information in common between two passages.
+        The distinction should briefly describe the information unique in each passage.
+        All the response should be a sequence of statements in thrid-person narration with all the coreferences resolved.
+        
+        {_compare_format}
+        '''
+        # current_passage = '\n'.join(pages[:passage_end])
+        # passage_after = '\n'.join(pages[passage_end:])
+        return f'''\nCurrent Passage:\n{current_passage}\n\nPassage After:\n{passage_after}\n\nAbove are two consecutive passages from a document, namely "Current Passage" and "Passage After".\nPlease compare the shared commonalities and unshared distinctions between the "Current Passage" and the "Passage After".\nYou should make use of the general context to correctly understand each passage.\nThe commonality should briefly describe the information in common between two passages.\nThe distinction should briefly describe the information unique in each passage.\nAll the response should be a sequence of statements in thrid-person narration with all the coreferences resolved.\n\n{LongDocPrompt._compare_format()}\n'''
+        
+    @staticmethod
+    def summary(current_passage:str):
+        '''
+        Current Passage:
+        {current_passage}
+        
+        Above is a passage from a document, namely "Current Passage".
+        Please summarize the "Current Passage".
+        The summary should briefly describe the information in the "Current Passage".
+        All the response should be a sequence of statements in thrid-person narration with all the coreferences resolved.
+        
+        {_summary_format}
+        '''
+        return f'''\nCurrent Passage:\n{current_passage}\n\nAbove is a passage from a document, namely "Current Passage".\nPlease summarize the "Current Passage".\nThe summary should briefly describe the information in the "Current Passage".\nAll the response should be a sequence of statements in thrid-person narration with all the coreferences resolved.\n\n{LongDocPrompt._summary_format()}\n'''
+        
     @staticmethod
     def relation_description_w_note(recap, passage, important_ents:List[str]):
         '''

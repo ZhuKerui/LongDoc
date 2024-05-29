@@ -129,3 +129,78 @@ def get_synonym_pairs() -> List[Tuple[str, str]]:
             continue
         pairs.update([frozenset((w1, w2)) for w1, w2 in itertools.combinations(synonyms.keys(), 2) if synonyms[w1].wup_similarity(synonyms[w2]) > 0.8])
     return [tuple(pair) for pair in pairs]
+
+class MyNode:
+    def __init__(self, is_leaf:bool, level:int, index:int) -> None:
+        self.is_leaf = is_leaf
+        self.level = level
+        self.index = index
+        self.summary = ''
+        self.children:List[MyNode | str] = []
+        self.left_sibling:MyNode = None
+        self.common_with_left = ''
+        self.unique_to_left = ''
+        self.unique_in_left = ''
+        self.right_sibling:MyNode = None
+        self.common_with_right = ''
+        self.unique_to_right = ''
+        self.unique_in_right = ''
+        self.parent:MyNode = None
+    
+    def dump(self):
+        return {
+            'is_leaf': self.is_leaf,
+            'level': self.level,
+            'index': self.index,
+            'summary': self.summary,
+            'children': [child if isinstance(child, str) else child.get_location() for child in self.children],
+            'left_sibling': self.left_sibling.get_location() if self.left_sibling is not None else None,
+            'common_with_left': self.common_with_left,
+            'unique_to_left': self.unique_to_left,
+            'unique_in_left': self.unique_in_left,
+            'right_sibling': self.right_sibling.get_location() if self.right_sibling is not None else None,
+            'common_with_right': self.common_with_right,
+            'unique_to_right': self.unique_to_right,
+            'unique_in_right': self.unique_in_right,
+            'parent': self.parent.get_location() if self.parent is not None else None
+        }
+        
+    @classmethod
+    def init_from_dict(cls, info:dict):
+        obj:MyNode = cls(info['is_leaf'], info['level'], info['index'], info['summary'])
+        obj.children = info['children']
+        obj.left_sibling = info['left_sibling']
+        obj.common_with_left = info['common_with_left']
+        obj.unique_to_left = info['unique_to_left']
+        obj.unique_in_left = info['unique_in_left']
+        obj.right_sibling = info['right_sibling']
+        obj.common_with_right = info['common_with_right']
+        obj.unique_to_right = info['unique_to_right']
+        obj.unique_in_right = info['unique_in_right']
+        obj.parent = info['parent']
+        return obj
+        
+    def resolve_neighbors(self, tree:List[list]):
+        if self.left_sibling is not None:
+            self.left_sibling = tree[self.left_sibling[0]][self.left_sibling[1]]
+        if self.right_sibling is not None:
+            self.right_sibling = tree[self.right_sibling[0]][self.right_sibling[1]]
+        if self.parent is not None:
+            self.parent = tree[self.parent[0]][self.parent[1]]
+        if self.children and not isinstance(self.children[0], str):
+            self.children = [tree[level][index] for level, index in self.children]
+        
+    def get_location(self):
+        return (self.level, self.index)
+
+def dump_tree(tree_file:str, tree:List[List[MyNode]]):
+    dumped_tree = [[node.dump() for node in level_nodes] for level_nodes in tree]
+    write_json(tree_file, dumped_tree)
+    
+def load_tree(tree_file:str):
+    dumped_tree = read_json(tree_file)
+    tree = [[MyNode.init_from_dict(info) for info in level_infos] for level_infos in dumped_tree]
+    for level_nodes in tree:
+        for node in level_nodes:
+            node.resolve_neighbors(tree)
+    return tree

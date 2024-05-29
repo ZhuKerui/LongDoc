@@ -474,6 +474,57 @@ class LongDoc:
                         temp_pids.append(cur_pid)
         return relation_graph
     
+
+    def build_summary_pyramid(
+        self, 
+        pages:List[str], 
+        summaries:List[str], 
+        summary_chunk_num: int = 5
+    ):
+        tree:List[List[MyNode]] = []
+        while len(tree) == 0 or len(tree[-1]) > int(1.5 * summary_chunk_num):
+            current_level_nodes:List[MyNode] = []
+            if len(tree) == 0:
+                for nid, (s, p) in enumerate(zip(summaries, pages)):
+                    leaf_node = MyNode(True, len(tree), nid)
+                    leaf_node.summary = s
+                    leaf_node.children.append(p)
+                    current_level_nodes.append(leaf_node)
+            else:
+                for bid, batch_start in enumerate(range(0, len(tree[-1]), summary_chunk_num)):
+                    batch_end = min(batch_start + summary_chunk_num, len(tree[-1]))
+                    current_node = MyNode(False, len(tree), bid)
+                    for child in tree[-1][batch_start : batch_end]:
+                        current_node.children.append(child)
+                        child.parent = current_node
+                    if bid != 0:
+                        current_level_nodes[-1].right_sibling = current_node
+                        current_node.left_sibling = current_level_nodes[-1]
+                    current_level_nodes.append(current_node)
+                
+                summary_prompts = [LongDocPrompt.summary('\n'.join([child.summary for child in node.children])) for node in current_level_nodes]
+                compare_prompts = [LongDocPrompt.summary('\n'.join([child.summary for child in current_level_nodes[nid].children]), '\n'.join([child.summary for child in current_level_nodes[nid + 1].children])) for nid in range(len(current_level_nodes)-1)]
+                print('Summarize:', len(summary_prompts))
+                summary_responses = self.llm_server(summary_prompts)
+                LongDocPrompt.parse_summary()
+                print('Compare:', len(compare_prompts))
+                compare_responses = self.llm_server(compare_prompts)
+                results = [LongDocPrompt.parse_batched_summary(r[0]) for r in responses]
+                for nid, (result, node) in enumerate(zip(results, current_level_nodes)):
+                    node.summary = result['summary']
+                    if nid != len(current_level_nodes) - 1:
+                        right_sibling = current_level_nodes[nid + 1]
+                        node.common_with_right = result['b_com']
+                        right_sibling.common_with_left = result['b_com'].replace('Current Passage', 'Passage Before').replace('Passage After', 'Current Passage')
+                        node.unique_to_right = result['uic']
+                        right_sibling.unique_in_left = result['uic'].replace('Current Passage', 'Passage Before').replace('Passage After', 'Current Passage')
+                        node.unique_in_right = result['uia']
+                        right_sibling.unique_to_left = result['uia'].replace('Current Passage', 'Passage Before').replace('Passage After', 'Current Passage')
+                
+            tree.append(current_level_nodes)
+        return tree
+
+
 def slide_encode(pages:List[str], retriever:Retriever, window_size:int=3):
     padded_pages = ([''] * (window_size-1)) + pages + ([''] * (window_size-1))
     p_input_ids = [retriever.retriever_tokenizer(p)['input_ids'][1:-1] for p in pages]
