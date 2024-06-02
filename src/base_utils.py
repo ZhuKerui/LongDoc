@@ -167,7 +167,8 @@ class MyNode:
         
     @classmethod
     def init_from_dict(cls, info:dict):
-        obj:MyNode = cls(info['is_leaf'], info['level'], info['index'], info['summary'])
+        obj:MyNode = cls(info['is_leaf'], info['level'], info['index'])
+        obj.summary = info['summary']
         obj.children = info['children']
         obj.left_sibling = info['left_sibling']
         obj.common_with_left = info['common_with_left']
