@@ -482,7 +482,7 @@ class LongDoc:
         summary_chunk_num: int = 5
     ):
         tree:List[List[MyNode]] = []
-        while len(tree) == 0 or len(tree[-1]) > int(1.5 * summary_chunk_num):
+        while len(tree) == 0 or len(tree[-1]) > 1:
             current_level_nodes:List[MyNode] = []
             if len(tree) == 0:
                 for nid, (s, p) in enumerate(zip(summaries, pages)):
@@ -491,8 +491,12 @@ class LongDoc:
                     leaf_node.children.append(p)
                     current_level_nodes.append(leaf_node)
             else:
-                for bid, batch_start in enumerate(range(0, len(tree[-1]), summary_chunk_num)):
-                    batch_end = min(batch_start + summary_chunk_num, len(tree[-1]))
+                if len(tree[-1]) > int(1.5 * summary_chunk_num):
+                    temp_summary_chunk_num = summary_chunk_num
+                else:
+                    temp_summary_chunk_num = len(tree[-1]) // 2 + 1
+                for bid, batch_start in enumerate(range(0, len(tree[-1]), temp_summary_chunk_num)):
+                    batch_end = min(batch_start + temp_summary_chunk_num, len(tree[-1]))
                     current_node = MyNode(False, len(tree), bid)
                     for child in tree[-1][batch_start : batch_end]:
                         current_node.children.append(child)
@@ -514,25 +518,26 @@ class LongDoc:
                     summary_eval_prompts = []
                     for sums, p in zip(temp_summaries, current_passages):
                         summary_eval_prompts.extend([LongDocPrompt.summary_eval(p, s) for s in sums])
-                    summary_evals = [LongDocPrompt.parse_summary_eval(response[0]) for response in self.llm_server(summary_eval_prompts)]
+                    # summary_evals = [LongDocPrompt.parse_summary_eval(response[0]) for response in self.llm_server(summary_eval_prompts)]
+                    summary_evals = [True] * len(summary_eval_prompts)
                     batched_summary_evals = [summary_evals[eid:eid+n] for eid in range(0, len(summary_evals), n)]
                     updated_summaries = {temp_summary_prompts[gid][0]: temp_summary[batched_summary_eval.index(True)] for gid, (temp_summary, batched_summary_eval) in enumerate(zip(temp_summaries, batched_summary_evals)) if any(batched_summary_eval)}
                     correct_summaries.update(updated_summaries)
                 
-                compare_prompts = [LongDocPrompt.compare(current_passages[nid], current_passages[nid + 1]) for nid in range(len(current_level_nodes)-1)]
-                print('Compare:', len(compare_prompts))
-                compare_responses = self.llm_server(compare_prompts)
-                compare_results = [LongDocPrompt.parse_compare(r[0]) for r in compare_responses]
+                # compare_prompts = [LongDocPrompt.compare(current_passages[nid], current_passages[nid + 1]) for nid in range(len(current_level_nodes)-1)]
+                # print('Compare:', len(compare_prompts))
+                # compare_responses = self.llm_server(compare_prompts)
+                # compare_results = [LongDocPrompt.parse_compare(r[0]) for r in compare_responses]
                 for node in current_level_nodes:
                     node.summary = correct_summaries[node.index]
-                    if node.index != len(current_level_nodes) - 1:
-                        compare_result = compare_results[node.index]
-                        node.common_with_right = compare_result['com']
-                        node.right_sibling.common_with_left = compare_result['com'].replace('Current Passage', 'Passage Before').replace('Passage After', 'Current Passage')
-                        node.unique_to_right = compare_result['uic']
-                        node.right_sibling.unique_in_left = compare_result['uic'].replace('Current Passage', 'Passage Before').replace('Passage After', 'Current Passage')
-                        node.unique_in_right = compare_result['uia']
-                        node.right_sibling.unique_to_left = compare_result['uia'].replace('Current Passage', 'Passage Before').replace('Passage After', 'Current Passage')
+                #     if node.index != len(current_level_nodes) - 1:
+                #         compare_result = compare_results[node.index]
+                #         node.common_with_right = compare_result['com']
+                #         node.right_sibling.common_with_left = compare_result['com'].replace('Current Passage', 'Passage Before').replace('Passage After', 'Current Passage')
+                #         node.unique_to_right = compare_result['uic']
+                #         node.right_sibling.unique_in_left = compare_result['uic'].replace('Current Passage', 'Passage Before').replace('Passage After', 'Current Passage')
+                #         node.unique_in_right = compare_result['uia']
+                #         node.right_sibling.unique_to_left = compare_result['uia'].replace('Current Passage', 'Passage Before').replace('Passage After', 'Current Passage')
             tree.append(current_level_nodes)
         return tree
 

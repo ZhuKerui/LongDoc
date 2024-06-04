@@ -256,7 +256,7 @@ class LongDocPrompt(GeneralPrompt):
         
         summaries = [summary[summary.lower().index(summary_header.lower()):].split(':', 1) for summary in response.split('\n\n') if summary_header.lower() in summary.lower()]
         summaries = [summary for summary in summaries if summary[0][header_len:].isnumeric()]
-        return {int(summary[0][header_len:]) - 1 : summary[1].strip() for summary in summaries}
+        return {int(summary[0][header_len:]) - 1 : summary[1].strip() for summary in summaries if summary[1].strip()}
     
     @staticmethod
     def _chunk_wise_entity_extraction_format(chunk_ids:List[int]):
@@ -467,17 +467,17 @@ class LongDocPrompt(GeneralPrompt):
         Above is a passage splitted into {chunk_num} chunks.
         Please summarize the chunks {chunk_ids} separately so that each summarized chunk can be understood independently. 
         You should make use of the general context to correctly understand each chunk.
-        Each summarized chunk should be a sequence of statements in thrid-person narration, containing all the essential information in the chunk, with all the coreferences resolved.
+        Each summarized chunk should be a sequence of statements in thrid-person narration, briefly describe the information in the chunk, with all the coreferences resolved.
 
         {_chunk_wise_rewrite_format}
         '''
-        passage = '\n'.join([f'Chunk {sid + 1}: {sent}' for sid, sent in enumerate(pages)])
+        passage = '\n\n'.join([f'Chunk {sid + 1}: {sent}' for sid, sent in enumerate(pages)])
         if len(chunk_ids) == 1:
             chunk_ids = set(chunk_ids)
             chunk_ids.update(np.random.choice(len(pages), 2))
             chunk_ids = list(chunk_ids)
             chunk_ids.sort()
-        return f'''\nPassage:\n{passage}\n\nAbove is a passage splitted into {len(pages)} chunks. \nPlease summarize chunks {[cid + 1 for cid in chunk_ids]} separately so that each summarized chunk can be understood independently. \nYou should make use of the general context to correctly understand each chunk.\nEach summarized chunk should be a sequence of statements in thrid-person narration, containing all the essential information in the chunk, with all the coreferences resolved.\n\n{LongDocPrompt._chunk_wise_rewrite_format(chunk_ids)}\n'''
+        return f'''\nPassage:\n{passage}\n\nAbove is a passage splitted into {len(pages)} chunks. \nPlease summarize chunks {[cid + 1 for cid in chunk_ids]} separately so that each summarized chunk can be understood independently. \nYou should make use of the general context to correctly understand each chunk.\nEach summarized chunk should be a sequence of statements in thrid-person narration, briefly describe the information in the chunk, with all the coreferences resolved.\n\n{LongDocPrompt._chunk_wise_rewrite_format(chunk_ids)}\n'''
     
     @staticmethod
     def chunk_wise_entity_extraction(pages:List[str], chunk_ids:List[int]):

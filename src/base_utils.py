@@ -1,4 +1,4 @@
-from rank_bm25 import BM25Okapi
+# from rank_bm25 import BM25Okapi
 from nltk import word_tokenize
 from nltk.corpus import wordnet
 
@@ -41,7 +41,7 @@ class DocIndex:
         self.summary = summary
         self.paragraph_embs = paragraph_embs
         self.pid2nodes = pid2nodes
-        self.bm25 = BM25Okapi([[w.lower() for w in word_tokenize(p)] for p in paragraphs])
+        # self.bm25 = BM25Okapi([[w.lower() for w in word_tokenize(p)] for p in paragraphs])
     
 
 class ChunkInfo:
