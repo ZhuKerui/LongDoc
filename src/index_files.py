@@ -243,7 +243,8 @@ class LongDoc:
         all_ents = list(ent2pids.keys())
         target_ents_emb:np.ndarray = self.retriever.embed_paragraphs(target_ents, True)
         refer_ents_emb:np.ndarray = self.retriever.embed_paragraphs(all_ents, True)
-        ent_map = LongDocPrompt.match_entities(target_ents, all_ents, target_ents_emb, refer_ents_emb, match_num, retrieval_guaranteed, self.retriever.syn_similarity)
+        list_ent = LongDocPrompt.ListEnt()
+        ent_map = list_ent.match_entities(target_ents, all_ents, target_ents_emb, refer_ents_emb, match_num, retrieval_guaranteed, self.retriever.syn_similarity)
         prev_ent_descriptions:Dict[int, Dict[str, str]] = defaultdict(dict)
         for _, mentions in ent_map.items():
             for mention in mentions:
@@ -252,7 +253,7 @@ class LongDoc:
         prev_relation_descriptions:Dict[int, List[Tuple[List[str], str]]] = defaultdict(list)
         all_nodes = list(relation_graph.nodes)
         refer_ents_emb:np.ndarray = self.retriever.embed_paragraphs(all_nodes, True)
-        node_map = LongDocPrompt.match_entities(target_ents, all_nodes, target_ents_emb, refer_ents_emb, match_num, retrieval_guaranteed, self.retriever.syn_similarity)
+        node_map = list_ent.match_entities(target_ents, all_nodes, target_ents_emb, refer_ents_emb, match_num, retrieval_guaranteed, self.retriever.syn_similarity)
         sub_nodes = set()
         for ent, mentions in node_map.items():
             sub_nodes.update(mentions)
@@ -332,135 +333,135 @@ class LongDoc:
                 ent_candidates_per_passage[pid].add(ent)
         return ent_candidates_per_passage if not return_ent_class else (ent_candidates_per_passage, ent_class)
     
-    def index_text(self, paragraphs:List[str], w_note:bool=True, match_num:int=5, r_num:int=1):
-        # Collect useful entities
-        ent_candidates_per_passage = self.collect_global_entities(paragraphs)
-        results:List[ChunkInfo] = []
-        relation_graph = nx.Graph()
-        for cur_pid, paragraph in enumerate(tqdm(paragraphs)):
-            chunk_info = ChunkInfo(cur_pid, paragraph)
-            if results and w_note:
-                summary_recap = {pid: results[pid].summary for pid in range(max(len(results)-r_num, 0), len(results))}
-                chunk_info.prev_summaries = summary_recap
+    # def index_text(self, paragraphs:List[str], w_note:bool=True, match_num:int=5, r_num:int=1):
+    #     # Collect useful entities
+    #     ent_candidates_per_passage = self.collect_global_entities(paragraphs)
+    #     results:List[ChunkInfo] = []
+    #     relation_graph = nx.Graph()
+    #     for cur_pid, paragraph in enumerate(tqdm(paragraphs)):
+    #         chunk_info = ChunkInfo(cur_pid, paragraph)
+    #         if results and w_note:
+    #             summary_recap = {pid: results[pid].summary for pid in range(max(len(results)-r_num, 0), len(results))}
+    #             chunk_info.prev_summaries = summary_recap
                 
-            if cur_pid not in ent_candidates_per_passage:
-                if results and w_note:
-                    list_entity_prompt = LongDocPrompt.list_entity_w_note(chunk_info.recap_str, paragraph)
-                else:
-                    list_entity_prompt = LongDocPrompt.list_entity(paragraph)
-                # Extract important entities
-                chat_response = self.llm_server(list_entity_prompt, 5, 0.7)[0]
-                important_ents = LongDocPrompt.parse_entities(chat_response, lambda x: self.retriever.embed_paragraphs(x, True), self.retriever.syn_similarity)
-            else:
-                important_ents = ent_candidates_per_passage[cur_pid]
-            chunk_info.important_ents = list(important_ents)
+    #         if cur_pid not in ent_candidates_per_passage:
+    #             if results and w_note:
+    #                 list_entity_prompt = LongDocPrompt.list_entity_w_note(chunk_info.recap_str, paragraph)
+    #             else:
+    #                 list_entity_prompt = LongDocPrompt.list_entity(paragraph)
+    #             # Extract important entities
+    #             chat_response = self.llm_server(list_entity_prompt, 5, 0.7)[0]
+    #             important_ents = LongDocPrompt.parse_entities(chat_response, lambda x: self.retriever.embed_paragraphs(x, True), self.retriever.syn_similarity)
+    #         else:
+    #             important_ents = ent_candidates_per_passage[cur_pid]
+    #         chunk_info.important_ents = list(important_ents)
             
-            # Generate entity description, summary, relation description
-            if results and w_note:
-                chunk_info.prev_ent_descriptions, chunk_info.prev_relation_descriptions = self.retrieve_descriptions(results, relation_graph, chunk_info.important_ents, match_num, r_num)
-                recap_str = chunk_info.recap_str
-                ent_description_prompt = LongDocPrompt.ent_description_w_note(recap_str, paragraph, chunk_info.important_ents)
-                summary_prompt = LongDocPrompt.shorten_w_note(recap_str, paragraph)
-                relation_description_prompt = LongDocPrompt.relation_description_w_note(recap_str, paragraph, chunk_info.important_ents)
-            else:
-                ent_description_prompt = LongDocPrompt.ent_description(paragraph, chunk_info.important_ents)
-                summary_prompt = LongDocPrompt.shorten(paragraph)
-                relation_description_prompt = LongDocPrompt.relation_description(paragraph, chunk_info.important_ents)
+    #         # Generate entity description, summary, relation description
+    #         if results and w_note:
+    #             chunk_info.prev_ent_descriptions, chunk_info.prev_relation_descriptions = self.retrieve_descriptions(results, relation_graph, chunk_info.important_ents, match_num, r_num)
+    #             recap_str = chunk_info.recap_str
+    #             ent_description_prompt = LongDocPrompt.ent_description_w_note(recap_str, paragraph, chunk_info.important_ents)
+    #             summary_prompt = LongDocPrompt.shorten_w_note(recap_str, paragraph)
+    #             relation_description_prompt = LongDocPrompt.relation_description_w_note(recap_str, paragraph, chunk_info.important_ents)
+    #         else:
+    #             ent_description_prompt = LongDocPrompt.ent_description(paragraph, chunk_info.important_ents)
+    #             summary_prompt = LongDocPrompt.shorten(paragraph)
+    #             relation_description_prompt = LongDocPrompt.relation_description(paragraph, chunk_info.important_ents)
             
-            ent_description, relation_description, summary = self.llm_server([ent_description_prompt, relation_description_prompt, summary_prompt])
-            ent_description, relation_description, summary = ent_description[0], relation_description[0], summary[0]
-            chunk_info.summary = summary
-            chunk_info.ent_descriptions = LongDocPrompt.parse_ent_description(ent_description, chunk_info.important_ents)
-            chunk_info.relation_descriptions = LongDocPrompt.parse_relation_description(relation_description, chunk_info.important_ents)
-            results.append(chunk_info)
-            for related_ents, _ in chunk_info.relation_descriptions:
-                for ent1, ent2 in itertools.combinations(related_ents, 2):
-                    if not relation_graph.has_edge(ent1, ent2):
-                        relation_graph.add_edge(ent1, ent2, pids=[])
-                    temp_pids:List[int] = relation_graph.get_edge_data(ent1, ent2)['pids']
-                    if cur_pid not in temp_pids:
-                        temp_pids.append(cur_pid)
-        return results
+    #         ent_description, relation_description, summary = self.llm_server([ent_description_prompt, relation_description_prompt, summary_prompt])
+    #         ent_description, relation_description, summary = ent_description[0], relation_description[0], summary[0]
+    #         chunk_info.summary = summary
+    #         chunk_info.ent_descriptions = LongDocPrompt.parse_ent_description(ent_description, chunk_info.important_ents)
+    #         chunk_info.relation_descriptions = LongDocPrompt.parse_relation_description(relation_description, chunk_info.important_ents)
+    #         results.append(chunk_info)
+    #         for related_ents, _ in chunk_info.relation_descriptions:
+    #             for ent1, ent2 in itertools.combinations(related_ents, 2):
+    #                 if not relation_graph.has_edge(ent1, ent2):
+    #                     relation_graph.add_edge(ent1, ent2, pids=[])
+    #                 temp_pids:List[int] = relation_graph.get_edge_data(ent1, ent2)['pids']
+    #                 if cur_pid not in temp_pids:
+    #                     temp_pids.append(cur_pid)
+    #     return results
     
-    def index_text_into_map(self, paragraphs:List[str], nbr_max_dist:int=1):
-        # Extract important entities
-        print('Collect important entities')
-        collect_start_time = time()
-        important_ents_list = [
-            LongDocPrompt.parse_entities(
-                chat_response, 
-                lambda x: self.retriever.embed_paragraphs(x, True), 
-                self.retriever.syn_similarity)
-            for chat_response in self.llm_server([LongDocPrompt.list_entity(p) for p in paragraphs], 5, 0.7)
-        ]
-        print('Collect important entities done', time() - collect_start_time)
+    # def index_text_into_map(self, paragraphs:List[str], nbr_max_dist:int=1):
+    #     # Extract important entities
+    #     print('Collect important entities')
+    #     collect_start_time = time()
+    #     important_ents_list = [
+    #         LongDocPrompt.parse_entities(
+    #             chat_response, 
+    #             lambda x: self.retriever.embed_paragraphs(x, True), 
+    #             self.retriever.syn_similarity)
+    #         for chat_response in self.llm_server([LongDocPrompt.list_entity(p) for p in paragraphs], 5, 0.7)
+    #     ]
+    #     print('Collect important entities done', time() - collect_start_time)
         
-        results = [ChunkInfo(cur_pid, paragraph, important_ents=important_ents) for cur_pid, (paragraph, important_ents) in enumerate(zip(paragraphs, important_ents_list))]
-        raw = {}
-        for nbr_dist in range(nbr_max_dist + 1):
-            relation_description_prompts = [
-                LongDocPrompt.pairwise_relation_description(
-                    ' '.join(paragraphs[cur_pid - nbr_dist : cur_pid + 1]), 
-                    results[cur_pid - nbr_dist].important_ents, 
-                    results[cur_pid].important_ents
-                )
-                for cur_pid in range(nbr_dist, len(paragraphs))
-            ]
-            temp_raw = []
-            for cur_pid, relation_description in zip(range(nbr_dist, len(paragraphs)), self.llm_server(relation_description_prompts)):
-                temp_raw.append((cur_pid, relation_description[0]))
-                relation_descriptions = LongDocPrompt.parse_pairwise_relation_description(relation_description[0], results[cur_pid - nbr_dist].important_ents, results[cur_pid].important_ents)
-                if nbr_dist == 0:
-                    results[cur_pid].relation_descriptions = relation_descriptions
-                else:
-                    results[cur_pid].prev_relation_descriptions[-nbr_dist] = relation_descriptions
-            raw[nbr_dist] = temp_raw
-        return results, raw
+    #     results = [ChunkInfo(cur_pid, paragraph, important_ents=important_ents) for cur_pid, (paragraph, important_ents) in enumerate(zip(paragraphs, important_ents_list))]
+    #     raw = {}
+    #     for nbr_dist in range(nbr_max_dist + 1):
+    #         relation_description_prompts = [
+    #             LongDocPrompt.pairwise_relation_description(
+    #                 ' '.join(paragraphs[cur_pid - nbr_dist : cur_pid + 1]), 
+    #                 results[cur_pid - nbr_dist].important_ents, 
+    #                 results[cur_pid].important_ents
+    #             )
+    #             for cur_pid in range(nbr_dist, len(paragraphs))
+    #         ]
+    #         temp_raw = []
+    #         for cur_pid, relation_description in zip(range(nbr_dist, len(paragraphs)), self.llm_server(relation_description_prompts)):
+    #             temp_raw.append((cur_pid, relation_description[0]))
+    #             relation_descriptions = LongDocPrompt.parse_pairwise_relation_description(relation_description[0], results[cur_pid - nbr_dist].important_ents, results[cur_pid].important_ents)
+    #             if nbr_dist == 0:
+    #                 results[cur_pid].relation_descriptions = relation_descriptions
+    #             else:
+    #                 results[cur_pid].prev_relation_descriptions[-nbr_dist] = relation_descriptions
+    #         raw[nbr_dist] = temp_raw
+    #     return results, raw
     
-    def lossless_index(self, pages:List[str], rewrite_chunk_num:int=5, prev_chunk_num:int=5, post_chunk_num:int=5, target:str='relation'):
-        missed_chunk_ids:List[List[int]] = []
-        batch_start_ends = []
-        summaries:List[dict] = []
-        for batch_start in range(0, len(pages), rewrite_chunk_num):
-            prev_start = max(batch_start - prev_chunk_num, 0)
-            batch_end = min(batch_start + rewrite_chunk_num, len(pages))
-            post_end = min(batch_end + post_chunk_num, len(pages))
-            chunk_start = batch_start - prev_start
-            chunk_end = batch_end - prev_start
-            chunk_ids = list(range(chunk_start, chunk_end))
-            missed_chunk_ids.append(chunk_ids)
-            batch_start_ends.append((prev_start, post_end))
-            summaries.append({})
+    # def lossless_index(self, pages:List[str], rewrite_chunk_num:int=5, prev_chunk_num:int=5, post_chunk_num:int=5, target:str='relation'):
+    #     missed_chunk_ids:List[List[int]] = []
+    #     batch_start_ends = []
+    #     summaries:List[dict] = []
+    #     for batch_start in range(0, len(pages), rewrite_chunk_num):
+    #         prev_start = max(batch_start - prev_chunk_num, 0)
+    #         batch_end = min(batch_start + rewrite_chunk_num, len(pages))
+    #         post_end = min(batch_end + post_chunk_num, len(pages))
+    #         chunk_start = batch_start - prev_start
+    #         chunk_end = batch_end - prev_start
+    #         chunk_ids = list(range(chunk_start, chunk_end))
+    #         missed_chunk_ids.append(chunk_ids)
+    #         batch_start_ends.append((prev_start, post_end))
+    #         summaries.append({})
 
-        while any(missed_chunk_ids):
-            temp_prompts = []
-            temp_summaries:List[dict] = []
-            temp_chunk_ids:List[list] = []
-            for chunk_ids, (batch_start, batch_end), summary in zip(missed_chunk_ids, batch_start_ends, summaries):
-                if chunk_ids:
-                    chunk_wise_func = LongDocPrompt.chunk_wise_rewrite if target == 'relation' else LongDocPrompt.chunk_wise_entity_extraction
-                    temp_prompts.append(chunk_wise_func(pages[batch_start:batch_end], chunk_ids))
-                    temp_summaries.append(summary)
-                    temp_chunk_ids.append(chunk_ids)
+    #     while any(missed_chunk_ids):
+    #         temp_prompts = []
+    #         temp_summaries:List[dict] = []
+    #         temp_chunk_ids:List[list] = []
+    #         for chunk_ids, (batch_start, batch_end), summary in zip(missed_chunk_ids, batch_start_ends, summaries):
+    #             if chunk_ids:
+    #                 chunk_wise_func = LongDocPrompt.chunk_wise_rewrite if target == 'relation' else LongDocPrompt.chunk_wise_entity_extraction
+    #                 temp_prompts.append(chunk_wise_func(pages[batch_start:batch_end], chunk_ids))
+    #                 temp_summaries.append(summary)
+    #                 temp_chunk_ids.append(chunk_ids)
 
-            print(len(temp_prompts))
-            responses = self.llm_server(temp_prompts)
+    #         print(len(temp_prompts))
+    #         responses = self.llm_server(temp_prompts)
 
-            for response, chunk_ids, summary in zip(responses, temp_chunk_ids, temp_summaries):
-                chunk_wise_parse_func = LongDocPrompt.parse_chunk_wise_rewrite if target == 'relation' else LongDocPrompt.parse_chunk_wise_entity_extraction
-                new_summaries = chunk_wise_parse_func(response[0])
-                summarized_chunk_ids = [chunk_id for chunk_id in chunk_ids if chunk_id in new_summaries]
-                for chunk_id in summarized_chunk_ids:
-                    summary[chunk_id] = new_summaries[chunk_id]
-                    chunk_ids.remove(chunk_id)
+    #         for response, chunk_ids, summary in zip(responses, temp_chunk_ids, temp_summaries):
+    #             chunk_wise_parse_func = LongDocPrompt.parse_chunk_wise_rewrite if target == 'relation' else LongDocPrompt.parse_chunk_wise_entity_extraction
+    #             new_summaries = chunk_wise_parse_func(response[0])
+    #             summarized_chunk_ids = [chunk_id for chunk_id in chunk_ids if chunk_id in new_summaries]
+    #             for chunk_id in summarized_chunk_ids:
+    #                 summary[chunk_id] = new_summaries[chunk_id]
+    #                 chunk_ids.remove(chunk_id)
         
-        all_summary:List[str] = []
-        for summary in summaries:
-            cid_sum_pairs = list(summary.items())
-            cid_sum_pairs.sort(key=lambda x: x[0])
-            all_summary.extend([s for _, s in cid_sum_pairs])
+    #     all_summary:List[str] = []
+    #     for summary in summaries:
+    #         cid_sum_pairs = list(summary.items())
+    #         cid_sum_pairs.sort(key=lambda x: x[0])
+    #         all_summary.extend([s for _, s in cid_sum_pairs])
         
-        return all_summary
+    #     return all_summary
     
     def build_relation_graph(self, notes:List[ChunkInfo]):
         relation_graph = nx.Graph()
@@ -475,73 +476,7 @@ class LongDoc:
         return relation_graph
     
 
-    def build_summary_pyramid(
-        self, 
-        pages:List[str], 
-        summaries:List[str], 
-        summary_chunk_num: int = 5
-    ):
-        tree:List[List[MyNode]] = []
-        while len(tree) == 0 or len(tree[-1]) > 1:
-            current_level_nodes:List[MyNode] = []
-            if len(tree) == 0:
-                for nid, (s, p) in enumerate(zip(summaries, pages)):
-                    leaf_node = MyNode(True, len(tree), nid)
-                    leaf_node.summary = s
-                    leaf_node.children.append(p)
-                    current_level_nodes.append(leaf_node)
-            else:
-                if len(tree[-1]) > int(1.5 * summary_chunk_num):
-                    temp_summary_chunk_num = summary_chunk_num
-                else:
-                    temp_summary_chunk_num = len(tree[-1]) // 2 + 1
-                for bid, batch_start in enumerate(range(0, len(tree[-1]), temp_summary_chunk_num)):
-                    batch_end = min(batch_start + temp_summary_chunk_num, len(tree[-1]))
-                    current_node = MyNode(False, len(tree), bid)
-                    for child in tree[-1][batch_start : batch_end]:
-                        current_node.children.append(child)
-                        child.parent = current_node
-                    if bid != 0:
-                        current_level_nodes[-1].right_sibling = current_node
-                        current_node.left_sibling = current_level_nodes[-1]
-                    current_level_nodes.append(current_node)
-                
-                current_passages = ['\n'.join([child.summary for child in node.children]) for node in current_level_nodes]
-                summary_prompts = [LongDocPrompt.summary(current_passage) for current_passage in current_passages]
-                correct_summaries:Dict[int, str] = {}
-                while len(correct_summaries) != len(summary_prompts):
-                    temp_summary_prompts = [(sid, sp) for sid, sp in enumerate(summary_prompts) if sid not in correct_summaries]
-                    print('Summarize:', len(temp_summary_prompts))
-                    n = 1 if not correct_summaries else 5
-                    temperature = 0 if not correct_summaries else 0.7
-                    temp_summaries = [[LongDocPrompt.parse_summary(r) for r in response] for response in self.llm_server([sp for _, sp in temp_summary_prompts], n, temperature)]
-                    summary_eval_prompts = []
-                    for sums, p in zip(temp_summaries, current_passages):
-                        summary_eval_prompts.extend([LongDocPrompt.summary_eval(p, s) for s in sums])
-                    # summary_evals = [LongDocPrompt.parse_summary_eval(response[0]) for response in self.llm_server(summary_eval_prompts)]
-                    summary_evals = [True] * len(summary_eval_prompts)
-                    batched_summary_evals = [summary_evals[eid:eid+n] for eid in range(0, len(summary_evals), n)]
-                    updated_summaries = {temp_summary_prompts[gid][0]: temp_summary[batched_summary_eval.index(True)] for gid, (temp_summary, batched_summary_eval) in enumerate(zip(temp_summaries, batched_summary_evals)) if any(batched_summary_eval)}
-                    correct_summaries.update(updated_summaries)
-                
-                # compare_prompts = [LongDocPrompt.compare(current_passages[nid], current_passages[nid + 1]) for nid in range(len(current_level_nodes)-1)]
-                # print('Compare:', len(compare_prompts))
-                # compare_responses = self.llm_server(compare_prompts)
-                # compare_results = [LongDocPrompt.parse_compare(r[0]) for r in compare_responses]
-                for node in current_level_nodes:
-                    node.summary = correct_summaries[node.index]
-                #     if node.index != len(current_level_nodes) - 1:
-                #         compare_result = compare_results[node.index]
-                #         node.common_with_right = compare_result['com']
-                #         node.right_sibling.common_with_left = compare_result['com'].replace('Current Passage', 'Passage Before').replace('Passage After', 'Current Passage')
-                #         node.unique_to_right = compare_result['uic']
-                #         node.right_sibling.unique_in_left = compare_result['uic'].replace('Current Passage', 'Passage Before').replace('Passage After', 'Current Passage')
-                #         node.unique_in_right = compare_result['uia']
-                #         node.right_sibling.unique_to_left = compare_result['uia'].replace('Current Passage', 'Passage Before').replace('Passage After', 'Current Passage')
-            tree.append(current_level_nodes)
-        return tree
-
-
+    
 def slide_encode(pages:List[str], retriever:Retriever, window_size:int=3):
     padded_pages = ([''] * (window_size-1)) + pages + ([''] * (window_size-1))
     p_input_ids = [retriever.retriever_tokenizer(p)['input_ids'][1:-1] for p in pages]
