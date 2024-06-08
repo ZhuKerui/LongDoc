@@ -14,7 +14,7 @@ torch.backends.cuda.enable_flash_sdp(False)
 # dataset = NarrativeQADataset()
 # dataset = LooGlEDataset()
 dataset = QualityDataset(llm=None, split='dev')
-factory = Factory()
+factory = Factory(device='cuda:1')
 # dataset = MuSiQueDataset()
 
 # if sys.argv[1] == 'gist':

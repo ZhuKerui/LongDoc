@@ -407,11 +407,11 @@ class GenerateQuery:
 
 
 class Factory:
-    def __init__(self, embeder_name:str=None, llm_name:str = 'mistralai/Mistral-7B-Instruct-v0.2', chunk_size:int=300) -> None:
+    def __init__(self, embeder_name:str=None, llm_name:str = 'mistralai/Mistral-7B-Instruct-v0.2', chunk_size:int=300, device:str='cpu') -> None:
         if embeder_name is not None:
-            self.embeder = HuggingFaceEmbeddings(model_name=embeder_name)
+            self.embeder = HuggingFaceEmbeddings(model_name=embeder_name, device=device)
         else:
-            self.embeder = HuggingFaceEmbeddings()
+            self.embeder = HuggingFaceEmbeddings(device=device)
         self.embeder_name = self.embeder.model_name
         self.tokenizer = AutoTokenizer.from_pretrained(self.embeder_name)
         self.splitter = SpacyTextSplitter(pipeline='en_core_web_lg', chunk_size=chunk_size, chunk_overlap=0, length_function=lambda x: len(self.tokenizer.encode(x, add_special_tokens=False)))
