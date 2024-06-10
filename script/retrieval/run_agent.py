@@ -19,7 +19,7 @@ dataset = QualityDataset(None, split='dev')
 
 f = Factory()
 
-for test_id in range(1, 20):
+for test_id in tqdm(range(1, 20)):
     ret_tool = 'dpr'
     article = dataset.get_article(dataset.data[test_id])
     questions, answers = dataset.get_questions_and_answers(dataset.data[test_id])
