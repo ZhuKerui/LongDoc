@@ -14,8 +14,8 @@ from src.test_utils import *
 from src.summary_tree import *
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
-# dataset = QualityDataset(None, split='dev')
-dataset = NarrativeQADataset()
+dataset = QualityDataset(None, split='dev')
+# dataset = NarrativeQADataset()
 
 f = Factory()
 
