@@ -20,7 +20,7 @@ dataset = QualityDataset(None, split='dev')
 f = Factory()
 
 for test_id in tqdm(range(1, 20)):
-    ret_tool = 'dpr'
+    ret_tool = 'tree'
     article = dataset.get_article(dataset.data[test_id])
     questions, answers = dataset.get_questions_and_answers(dataset.data[test_id])
     dpr_retriever, tree_retriever, documents = f.build_corpus(article, dpr_file=os.path.join(dataset.data_dir, f'dpr_{test_id}.json'), tree_file=os.path.join(dataset.data_dir, f'tree_{test_id}.json'))
