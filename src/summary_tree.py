@@ -17,6 +17,8 @@ from langchain_community.vectorstores import Chroma
 from langchain_core.embeddings import Embeddings
 from langchain import hub
 
+os.environ["OPENAI_API_KEY"] = "EMPTY"
+
 class MyIndex(BaseModel):
     i: int
     
