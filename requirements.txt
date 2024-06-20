@@ -1,11 +1,6 @@
-torch==2.0.1
-transformers
-xopen
-pydantic
-conda install -c "nvidia/label/cuda-11.7.1" cuda-nvcc
-accelerate
+vllm
 datasets
-sentencepiece
-tiktoken
-protobuf
-pip install transformers_stream_generator
+langchain
+langchain_openai
+langchain_huggingface
+langgraph
