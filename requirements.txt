@@ -1,6 +1,12 @@
 vllm
 datasets
 langchain
+langchain_community
 langchain_openai
 langchain_huggingface
 langgraph
+nltk
+spacy
+matplotlib
+rank-bm25
+https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.7.1/en_core_web_sm-3.7.1.tar.gz
