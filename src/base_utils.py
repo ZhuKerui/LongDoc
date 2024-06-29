@@ -1,7 +1,3 @@
-# from rank_bm25 import BM25Okapi
-from nltk import word_tokenize
-from nltk.corpus import wordnet
-
 from .base import *
 
 def read_jsonline(file:str):
@@ -34,98 +30,75 @@ def normalize_answer(s):
 
     return white_space_fix(remove_articles(remove_punc(lower(s))))
 
-class DocIndex:
-    def __init__(self, graph:nx.DiGraph, paragraphs:List[str], summary:List[str], paragraph_embs:np.ndarray, pid2nodes:List[List[str]]) -> None:
-        self.graph = graph
-        self.paragraphs = paragraphs
-        self.summary = summary
-        self.paragraph_embs = paragraph_embs
-        self.pid2nodes = pid2nodes
-        # self.bm25 = BM25Okapi([[w.lower() for w in word_tokenize(p)] for p in paragraphs])
+class MyIndex(BaseModel):
+    i: int
     
-
-class ChunkInfo:
-    def __init__(
-        self, 
-        cur_pid:int,
-        passage:str, 
-        summary:str='', 
-        important_ents:List[str]=[], 
-        ent_descriptions:Dict[str, str]={}, 
-        relation_descriptions:List[Tuple[List[str], str]]=[], 
-        prev_ent_descriptions:Dict[int, Dict[str, str]]={}, 
-        prev_relation_descriptions:Dict[int, List[Tuple[List[str], str]]]={},
-        prev_summaries:Dict[int, str]={}
-        ) -> None:
-        self.cur_pid = cur_pid
-        self.passage = passage
-        self.summary = summary
-        self.important_ents = important_ents
-        self.ent_descriptions = ent_descriptions
-        self.relation_descriptions = relation_descriptions
-        self.prev_ent_descriptions = {int(k): v for k, v in prev_ent_descriptions.items()}
-        self.prev_relation_descriptions = {int(k): v for k, v in prev_relation_descriptions.items()}
-        self.prev_summaries = {int(k): v for k, v in prev_summaries.items()}
-        
-    def to_json(self):
-        return {
-            'cur_pid': self.cur_pid,
-            'passage': self.passage,
-            'summary': self.summary,
-            'important_ents': self.important_ents,
-            'ent_descriptions': self.ent_descriptions,
-            'relation_descriptions': self.relation_descriptions,
-            'prev_ent_descriptions': self.prev_ent_descriptions,
-            'prev_relation_descriptions': self.prev_relation_descriptions,
-            'prev_summaries': self.prev_summaries
-        }
+class MyNode(BaseModel):
+    text:str = ''
+    index:MyIndex
     
-    @property
-    def recap_str(self):
-        retrieved_recap = defaultdict(lambda: {'summary': '', 'ent_description': '', 'rel_description': ''})
-        for pid, summary in self.prev_summaries.items():
-            retrieved_recap[pid]['summary'] = summary
-        for pid, e_d in self.prev_ent_descriptions.items():
-            retrieved_recap[pid]['ent_description'] = '\n'.join([f'{e}: {d}' for e, d in e_d.items()])
-        for pid, r_d in self.prev_relation_descriptions.items():
-            retrieved_recap[pid]['rel_description'] = '\n'.join([f'{", ".join(r)}: {d}' for r, d in r_d])
-        recaps = []
-        retrieved_recap_list = list(retrieved_recap.items())
-        retrieved_recap_list.sort(key=lambda x: x[0])
-        for pid, retrieved in retrieved_recap_list:
-            ent_d_str, rel_d_str, summary_str = '', '', ''
-            if retrieved['summary']:
-                summary_str = f"Summary:\n{retrieved['summary']}\n"
-            if retrieved['ent_description']:
-                ent_d_str = f"Entity descriptions:\n{retrieved['ent_description']}\n"
-            if retrieved['rel_description']:
-                rel_d_str = f"Relation descriptions:\n{retrieved['rel_description']}\n"
-            recaps.append(f'Passage {int(pid) - self.cur_pid}:\n{ent_d_str}{rel_d_str}{summary_str}')
-        recap_str = '\n'.join(recaps)
-        return recap_str
-        
-    def print(self):
-        important_ents_str = '\n'.join(self.important_ents)
-        entity_description_str = '\n'.join([f'{e}: {d}' for e, d in self.ent_descriptions.items()])
-        relation_description_str = '\n'.join([f'{r}: {d}' for r, d in self.relation_descriptions])
-        print(f'''Recap:\n{self.recap_str}\n\nPassage:\n{self.passage}\n\nImportant entities:\n\n{important_ents_str}\n\nEntity descriptions:\n{entity_description_str}\n\nRelation description:\n{relation_description_str}\n\nSummary:\n{self.summary}''')
-        
-
-def log_info(log_file:str, tag:str, info):
-    if log_file is not None:
-        with open(log_file, 'a') as f_out:
-            f_out.write(json.dumps([tag, info]))
-            f_out.write('\n')
+    def to_doc(self):
+        return Document(page_content=self.text, metadata={'i' : self.index.i})
     
-
-def get_synonym_pairs() -> List[Tuple[str, str]]:
-    nouns = set()
-    for noun in wordnet.all_synsets(wordnet.NOUN):
-        nouns.update(noun.lemma_names())
-    pairs = set()
-    for noun in nouns:
-        synonyms = {synset.name().split('.')[0].replace('_', ' ') : synset for synset in wordnet.synsets(noun, wordnet.NOUN)}
-        if len(synonyms) < 2:
-            continue
-        pairs.update([frozenset((w1, w2)) for w1, w2 in itertools.combinations(synonyms.keys(), 2) if synonyms[w1].wup_similarity(synonyms[w2]) > 0.8])
-    return [tuple(pair) for pair in pairs]
+class MyStructure:
+    node_class = MyNode
+    name:str
+    
+    def __init__(self, doc_file:str=None) -> None:
+        self.docs:List[MyNode] = []
+        if doc_file is not None:
+            self.load(doc_file)
+            
+    def dump(self, doc_file:str):
+        dumped_docs = [node.dict() for node in self.docs]
+        write_json(doc_file, dumped_docs)
+        
+    def load(self, doc_file:str):
+        dumped_tree = read_json(doc_file)
+        self.docs = [self.node_class.validate(node_info) for node_info in dumped_tree]
+        
+    def create_vector_retriever(self, embedding:Embeddings):
+        self.vectorstore = Chroma.from_documents(
+            documents=[doc.to_doc() for doc in self.docs],
+            collection_name=f"{self.name}-chroma",
+            embedding=embedding,
+        )
+        self.retriever = self.vectorstore.as_retriever()
+        
+class Factory:
+    def __init__(self, embeder_name:str=None, llm_name:str = DEFAULT_LLM, chunk_size:int=300, device:str='cpu') -> None:
+        if embeder_name is not None:
+            self.embeder = HuggingFaceEmbeddings(model_name=embeder_name, model_kwargs={'device': device})
+        else:
+            self.embeder = HuggingFaceEmbeddings(model_kwargs={'device': device})
+        self.embeder_name = self.embeder.model_name
+        self.tokenizer = AutoTokenizer.from_pretrained(self.embeder_name)
+        self.splitter = SpacyTextSplitter(pipeline='en_core_web_lg', chunk_size=chunk_size, chunk_overlap=0, length_function=lambda x: len(self.tokenizer.encode(x, add_special_tokens=False)))
+        
+        
+        self.llm_name = llm_name
+        if self.llm_name:
+            self.llm = ChatOpenAI(model=llm_name, base_url='http://128.174.136.28:8000/v1', temperature=0)
+        
+    def split_text(self, text:str):
+        return [' '.join(t.split()) for t in self.splitter.split_text(text)]
+    
+    # def build_corpus(self, text:str, dpr_file:str='temp_dpr.json', tree_file:str='temp_tree.json'):
+    #     if not os.path.exists(dpr_file) or not os.path.exists(tree_file):
+    #         pages = self.split_text(text)
+    #     if os.path.exists(dpr_file):
+    #         dpr_corpus = MyDPR(dpr_file)
+    #     else:
+    #         dpr_corpus = MyDPR.build_dpr(pages)
+    #         dpr_corpus.dump(dpr_file)
+    #     dpr_corpus.create_vector_retriever(self.embeder)
+            
+    #     if os.path.exists(tree_file):
+    #         tree_corpus = MyTree(tree_file)
+    #     else:
+    #         tree_corpus, _ = MyTree.build_summary_pyramid(self.llm, pages, 3)
+    #         tree_corpus.dump(tree_file)
+    #     tree_corpus.create_vector_retriever(self.embeder)
+        
+    #     return dpr_corpus, tree_corpus, [doc.to_doc() for doc in dpr_corpus.docs]
+    

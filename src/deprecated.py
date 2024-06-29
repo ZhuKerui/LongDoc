@@ -1,6 +1,4 @@
-from rouge_metric import PyRouge
 from .data import Dataset
-from .models import Retriever, LLM, LLMServer
 from .base_utils import *
 from .prompt import *
 import itertools
@@ -387,3 +385,234 @@ class LongDoc:
                 query = re_write_response
                 state = 'retrieve'
                 step += 1
+
+class DocIndex:
+    def __init__(self, graph:nx.DiGraph, paragraphs:List[str], summary:List[str], paragraph_embs:np.ndarray, pid2nodes:List[List[str]]) -> None:
+        self.graph = graph
+        self.paragraphs = paragraphs
+        self.summary = summary
+        self.paragraph_embs = paragraph_embs
+        self.pid2nodes = pid2nodes
+        # self.bm25 = BM25Okapi([[w.lower() for w in word_tokenize(p)] for p in paragraphs])
+    
+
+class ChunkInfo:
+    def __init__(
+        self, 
+        cur_pid:int,
+        passage:str, 
+        summary:str='', 
+        important_ents:List[str]=[], 
+        ent_descriptions:Dict[str, str]={}, 
+        relation_descriptions:List[Tuple[List[str], str]]=[], 
+        prev_ent_descriptions:Dict[int, Dict[str, str]]={}, 
+        prev_relation_descriptions:Dict[int, List[Tuple[List[str], str]]]={},
+        prev_summaries:Dict[int, str]={}
+        ) -> None:
+        self.cur_pid = cur_pid
+        self.passage = passage
+        self.summary = summary
+        self.important_ents = important_ents
+        self.ent_descriptions = ent_descriptions
+        self.relation_descriptions = relation_descriptions
+        self.prev_ent_descriptions = {int(k): v for k, v in prev_ent_descriptions.items()}
+        self.prev_relation_descriptions = {int(k): v for k, v in prev_relation_descriptions.items()}
+        self.prev_summaries = {int(k): v for k, v in prev_summaries.items()}
+        
+    def to_json(self):
+        return {
+            'cur_pid': self.cur_pid,
+            'passage': self.passage,
+            'summary': self.summary,
+            'important_ents': self.important_ents,
+            'ent_descriptions': self.ent_descriptions,
+            'relation_descriptions': self.relation_descriptions,
+            'prev_ent_descriptions': self.prev_ent_descriptions,
+            'prev_relation_descriptions': self.prev_relation_descriptions,
+            'prev_summaries': self.prev_summaries
+        }
+    
+    @property
+    def recap_str(self):
+        retrieved_recap = defaultdict(lambda: {'summary': '', 'ent_description': '', 'rel_description': ''})
+        for pid, summary in self.prev_summaries.items():
+            retrieved_recap[pid]['summary'] = summary
+        for pid, e_d in self.prev_ent_descriptions.items():
+            retrieved_recap[pid]['ent_description'] = '\n'.join([f'{e}: {d}' for e, d in e_d.items()])
+        for pid, r_d in self.prev_relation_descriptions.items():
+            retrieved_recap[pid]['rel_description'] = '\n'.join([f'{", ".join(r)}: {d}' for r, d in r_d])
+        recaps = []
+        retrieved_recap_list = list(retrieved_recap.items())
+        retrieved_recap_list.sort(key=lambda x: x[0])
+        for pid, retrieved in retrieved_recap_list:
+            ent_d_str, rel_d_str, summary_str = '', '', ''
+            if retrieved['summary']:
+                summary_str = f"Summary:\n{retrieved['summary']}\n"
+            if retrieved['ent_description']:
+                ent_d_str = f"Entity descriptions:\n{retrieved['ent_description']}\n"
+            if retrieved['rel_description']:
+                rel_d_str = f"Relation descriptions:\n{retrieved['rel_description']}\n"
+            recaps.append(f'Passage {int(pid) - self.cur_pid}:\n{ent_d_str}{rel_d_str}{summary_str}')
+        recap_str = '\n'.join(recaps)
+        return recap_str
+        
+    def print(self):
+        important_ents_str = '\n'.join(self.important_ents)
+        entity_description_str = '\n'.join([f'{e}: {d}' for e, d in self.ent_descriptions.items()])
+        relation_description_str = '\n'.join([f'{r}: {d}' for r, d in self.relation_descriptions])
+        print(f'''Recap:\n{self.recap_str}\n\nPassage:\n{self.passage}\n\nImportant entities:\n\n{important_ents_str}\n\nEntity descriptions:\n{entity_description_str}\n\nRelation description:\n{relation_description_str}\n\nSummary:\n{self.summary}''')
+        
+
+
+def log_info(log_file:str, tag:str, info):
+    if log_file is not None:
+        with open(log_file, 'a') as f_out:
+            f_out.write(json.dumps([tag, info]))
+            f_out.write('\n')
+    
+
+def get_synonym_pairs() -> List[Tuple[str, str]]:
+    nouns = set()
+    for noun in wordnet.all_synsets(wordnet.NOUN):
+        nouns.update(noun.lemma_names())
+    pairs = set()
+    for noun in nouns:
+        synonyms = {synset.name().split('.')[0].replace('_', ' ') : synset for synset in wordnet.synsets(noun, wordnet.NOUN)}
+        if len(synonyms) < 2:
+            continue
+        pairs.update([frozenset((w1, w2)) for w1, w2 in itertools.combinations(synonyms.keys(), 2) if synonyms[w1].wup_similarity(synonyms[w2]) > 0.8])
+    return [tuple(pair) for pair in pairs]
+
+
+
+class DocSplit:
+    def split_trec(text:str):
+        lines = text.splitlines()
+        return ['\n'.join(lines[i * 2 : i * 2 + 1]) for i in range(len(lines) // 2)]
+
+    def split_triviaqa(text:str):
+        lines = text.splitlines()
+        paragraphs = []
+        paragraph = []
+        lid = 0
+        while lid < len(lines):
+            paragraph.append(lines[lid])
+            if lines[lid] == 'Answer:':
+                lid += 1
+                paragraph.append(lines[lid])
+                paragraphs.append('\n'.join(paragraph))
+                paragraph.clear()
+            lid += 1
+        return paragraphs
+
+    def split_samsum(text:str):
+        paragraphs = []
+        paragraph = []
+        for line in text.splitlines():
+            paragraph.append(line)
+            if line.startswith('Summary: '):
+                paragraphs.append('\n'.join(paragraph))
+                paragraph.clear()
+        return paragraphs
+
+    paragraph_sep_map = {
+        'qasper': '\n', 
+        'multifieldqa_zh': '\n', 
+        'qmsum': '\n', 
+        'multi_news': '\n', 
+        'vcsum': '\n', 
+        'trec': (split_trec, '\n'), 
+        'triviaqa': (split_triviaqa, '\n'), 
+        'samsum': (split_samsum, '\n'), 
+    }
+    
+    def __init__(self, tokenizer:AutoTokenizer) -> None:
+        self.llm_tokenizer = tokenizer
+        
+    def _append_paragraph(self, paragraphs:list, tokenized_p:List[int]):
+        paragraph = self.llm_tokenizer.decode(tokenized_p)
+        paragraphs.append(paragraph)
+        tokenized_p.clear()
+        
+    def get_task_paragraph_sep(self, task_name:str):
+        sep = self.paragraph_sep_map.get(task_name, '\n\n')
+        if not isinstance(sep, str):
+            func, sep = sep
+        return sep
+    
+    # def split_context_to_paragraphs(self, context:str, task_name:str):
+    #     sep = self.paragraph_sep_map.get(task_name, '\n\n')
+    #     if isinstance(sep, str):
+    #         return context.split(sep)
+    #     else:
+    #         func, sep = self.paragraph_sep_map[task_name]
+    #         return func(context)
+        
+    # def split_single_paragraph(self, text:str, paragraph_size:int=300, is_natural_language:bool=True):
+    #     splited_paragraphs:List[str] = []
+    #     splited_paragraph = []
+    #     sentences:List[str] = sent_tokenize(text) if is_natural_language else text.split('\n')
+    #     for sent in sentences:
+    #         tokenized_s = self.llm_tokenizer.encode(sent)[1:]
+    #         if len(tokenized_s) <= paragraph_size:
+    #             if len(splited_paragraph) + len(tokenized_s) > paragraph_size:
+    #                 self._append_paragraph(splited_paragraphs, splited_paragraph)
+    #             splited_paragraph.extend(tokenized_s)
+    #         else:
+    #             if splited_paragraph:
+    #                 self._append_paragraph(splited_paragraphs, splited_paragraph)
+    #             chunk_size = (len(tokenized_s) - 1) // paragraph_size + 1
+    #             for i in range(chunk_size - 1):
+    #                 self._append_paragraph(splited_paragraphs, tokenized_s[i * paragraph_size: (i+1) * paragraph_size])
+    #             splited_paragraph = tokenized_s[(chunk_size - 1) * paragraph_size:]
+    #     return splited_paragraphs, splited_paragraph
+        
+    def split_paragraphs(self, text:str, max_size:int=300, keep_full_sent:bool=False):
+        reformated_paragraphs:List[str] = []
+        reformated_paragraph = []
+        max_size -= 2 # Remove <s> and </s>
+        
+        for s in sent_tokenize(text):
+            tokenized_s = self.llm_tokenizer.encode(s)[1:-1]
+            if len(tokenized_s) <= max_size:
+                if len(reformated_paragraph) + len(tokenized_s) > max_size:
+                    self._append_paragraph(reformated_paragraphs, reformated_paragraph)
+                reformated_paragraph.extend(tokenized_s)
+            else:
+                if keep_full_sent:
+                    self._append_paragraph(reformated_paragraphs, reformated_paragraph)
+                    self._append_paragraph(reformated_paragraphs, tokenized_s)
+                else:
+                    reformated_paragraph.extend(tokenized_s)
+                    p_start, p_end = 0, max_size
+                    while p_end <= len(reformated_paragraph):
+                        self._append_paragraph(reformated_paragraphs, reformated_paragraph[p_start:p_end])
+                        p_start, p_end = p_end, p_end + max_size
+                    reformated_paragraph = reformated_paragraph[p_start:p_end]
+                
+        if reformated_paragraph:
+            self._append_paragraph(reformated_paragraphs, reformated_paragraph)
+        return reformated_paragraphs
+    
+def slide_encode(pages:List[str], retriever:Retriever, window_size:int=3):
+    padded_pages = ([''] * (window_size-1)) + pages + ([''] * (window_size-1))
+    p_input_ids = [retriever.retriever_tokenizer(p)['input_ids'][1:-1] for p in pages]
+    batched_pids = [[pid_ - window_size + 1 for pid_ in range(pid, pid + window_size) if padded_pages[pid_]] for pid in range(len(padded_pages) - window_size + 1)]
+    reformed_pages = [' '.join([pages[pid] for pid in pids]) for pids in batched_pids]
+    p_emb = retriever.embed_paragraphs(reformed_pages, complete_return=True)
+    pid2embs = [[] for p in pages]
+    pid2lhs = [[] for p in pages]
+    for temp_input_ids, temp_lhs, pids in zip(p_emb.input_ids, p_emb.last_hidden_states, batched_pids):
+        p_start = 1
+        for pid in pids:
+            p_len = len(p_input_ids[pid])
+            p_end = p_start + p_len
+            if temp_input_ids[p_start:p_end].tolist() != p_input_ids[pid]: # align check
+                print('fail')
+                break
+            pid2lhs[pid].append(temp_lhs[p_start:p_end])
+            pid2embs[pid].append(temp_lhs[p_start:p_end].mean(0))
+            p_start = p_end
+    pid2embs = [np.vstack(embs) for embs in pid2embs]
+    pid2lhs = [np.concatenate(np.expand_dims(lhs, 0), 0) for lhs in pid2lhs]
+    return p_input_ids, pid2embs, pid2lhs

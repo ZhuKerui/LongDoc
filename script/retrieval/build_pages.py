@@ -2,10 +2,8 @@
 import sys
 sys.path.append('../..')
 
-from src.base import *
-from src.base_utils import write_json, read_json
 from src.data import QualityDataset, NarrativeQADataset, LooGlEDataset, MuSiQueDataset
-from src.summary_tree import Factory
+from src.index_files import *
 
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_flash_sdp(False)
@@ -13,23 +11,18 @@ torch.backends.cuda.enable_flash_sdp(False)
 
 # dataset = NarrativeQADataset()
 # dataset = LooGlEDataset()
-dataset = QualityDataset(llm=None, split='dev')
-factory = Factory(device='cuda:1')
+dataset = QualityDataset(split='dev')
 # dataset = MuSiQueDataset()
 
-# if sys.argv[1] == 'gist':
-#     reading_agent = ReadingAgent(dataset, llm)
-# longdoc = LongDoc(retriever, llm)
-
 start = 0
-end = 20
+end = 40
 
-import sys
+factory = Factory(device='cuda:2', chunk_size=100)
+longdoc = LongDoc(factory=factory)
 
 for eid in range(start, end):
     print(eid - start+ 1, '/', end - start)
-    dpr_file = os.path.join(dataset.data_dir, f'dpr_{eid}.json')
-    tree_file = os.path.join(dataset.data_dir, f'tree_{eid}.json')
+    index_file = os.path.join(dataset.data_dir, f'index_{eid}.json')
     article = dataset.get_article(dataset.data[eid])
-    _, _ = factory.build_corpus(text=article, dpr_file=dpr_file, tree_file=tree_file)
+    longdoc.build_index(article, chunk_info_file=index_file)
     

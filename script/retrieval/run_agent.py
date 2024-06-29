@@ -4,15 +4,8 @@ sys.path.append('../..')
 from datetime import datetime
 from langchain_core.tracers.context import tracing_v2_enabled
 
-import os
-os.environ["OPENAI_API_KEY"] = "EMPTY"
-os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
-
-
-from src import *
-from src.test_utils import *
 from src.summary_tree import *
-os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 
 dataset = QualityDataset(None, split='dev')
 # dataset = NarrativeQADataset()

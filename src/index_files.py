@@ -1,276 +1,112 @@
-import copy
-from sklearn.cluster import DBSCAN
-import spacy
-
-from .prompt import GeneralPrompt, LongDocPrompt, ReadingAgentPrompt
 from .data import *
 
-class DocSplit:
-    def split_trec(text:str):
-        lines = text.splitlines()
-        return ['\n'.join(lines[i * 2 : i * 2 + 1]) for i in range(len(lines) // 2)]
+def concate_with_overlap(pieces:List[str], chunk_size:int=10, overlap:int=1):
+    chunk_size_with_overlap = chunk_size + overlap
+    return [pieces[batch_start * chunk_size : batch_start * chunk_size + chunk_size_with_overlap] for batch_start in range((len(pieces) + 1) // chunk_size)]
 
-    def split_triviaqa(text:str):
-        lines = text.splitlines()
-        paragraphs = []
-        paragraph = []
-        lid = 0
-        while lid < len(lines):
-            paragraph.append(lines[lid])
-            if lines[lid] == 'Answer:':
-                lid += 1
-                paragraph.append(lines[lid])
-                paragraphs.append('\n'.join(paragraph))
-                paragraph.clear()
-            lid += 1
-        return paragraphs
 
-    def split_samsum(text:str):
-        paragraphs = []
-        paragraph = []
-        for line in text.splitlines():
-            paragraph.append(line)
-            if line.startswith('Summary: '):
-                paragraphs.append('\n'.join(paragraph))
-                paragraph.clear()
-        return paragraphs
 
-    paragraph_sep_map = {
-        'qasper': '\n', 
-        'multifieldqa_zh': '\n', 
-        'qmsum': '\n', 
-        'multi_news': '\n', 
-        'vcsum': '\n', 
-        'trec': (split_trec, '\n'), 
-        'triviaqa': (split_triviaqa, '\n'), 
-        'samsum': (split_samsum, '\n'), 
-    }
-    
-    def __init__(self, tokenizer:AutoTokenizer) -> None:
-        self.llm_tokenizer = tokenizer
+
+summary_prompt = '''Summarize the following passage.
+
+Passage:
+{chunk}'''
+
+statement_prompt = '''A summary of a story and a passage from the story is provided below.
+
+
+Summary:
+{summary}
+
+
+Passage:
+{chunk}
+
+
+A summary of a story and a passage from the story is provided above.
+Break the passage into a comprehensive list of atomic fact statements.
+The statements should be ordered as they appear in the passage.
+Try to use the original words from the passage.
+You should use the summary as the context to help you better understand the passage.'''
+
+
+import spacy
+from rank_bm25 import BM25Okapi
+import spacy.tokens
+
+class ChunkInfo(BaseModel):
+    i: int
+    chunk_text: str
+    statements: List[str] = []
+    entities: List[List[str]] = []
+    keywords: List[List[str]] = []
         
-    def _append_paragraph(self, paragraphs:list, tokenized_p:List[int]):
-        paragraph = self.llm_tokenizer.decode(tokenized_p)
-        paragraphs.append(paragraph)
-        tokenized_p.clear()
-        
-    def get_task_paragraph_sep(self, task_name:str):
-        sep = self.paragraph_sep_map.get(task_name, '\n\n')
-        if not isinstance(sep, str):
-            func, sep = sep
-        return sep
-    
-    # def split_context_to_paragraphs(self, context:str, task_name:str):
-    #     sep = self.paragraph_sep_map.get(task_name, '\n\n')
-    #     if isinstance(sep, str):
-    #         return context.split(sep)
-    #     else:
-    #         func, sep = self.paragraph_sep_map[task_name]
-    #         return func(context)
-        
-    # def split_single_paragraph(self, text:str, paragraph_size:int=300, is_natural_language:bool=True):
-    #     splited_paragraphs:List[str] = []
-    #     splited_paragraph = []
-    #     sentences:List[str] = sent_tokenize(text) if is_natural_language else text.split('\n')
-    #     for sent in sentences:
-    #         tokenized_s = self.llm_tokenizer.encode(sent)[1:]
-    #         if len(tokenized_s) <= paragraph_size:
-    #             if len(splited_paragraph) + len(tokenized_s) > paragraph_size:
-    #                 self._append_paragraph(splited_paragraphs, splited_paragraph)
-    #             splited_paragraph.extend(tokenized_s)
-    #         else:
-    #             if splited_paragraph:
-    #                 self._append_paragraph(splited_paragraphs, splited_paragraph)
-    #             chunk_size = (len(tokenized_s) - 1) // paragraph_size + 1
-    #             for i in range(chunk_size - 1):
-    #                 self._append_paragraph(splited_paragraphs, tokenized_s[i * paragraph_size: (i+1) * paragraph_size])
-    #             splited_paragraph = tokenized_s[(chunk_size - 1) * paragraph_size:]
-    #     return splited_paragraphs, splited_paragraph
-        
-    def split_paragraphs(self, text:str, max_size:int=300, keep_full_sent:bool=False):
-        reformated_paragraphs:List[str] = []
-        reformated_paragraph = []
-        max_size -= 2 # Remove <s> and </s>
-        
-        for s in sent_tokenize(text):
-            tokenized_s = self.llm_tokenizer.encode(s)[1:-1]
-            if len(tokenized_s) <= max_size:
-                if len(reformated_paragraph) + len(tokenized_s) > max_size:
-                    self._append_paragraph(reformated_paragraphs, reformated_paragraph)
-                reformated_paragraph.extend(tokenized_s)
-            else:
-                if keep_full_sent:
-                    self._append_paragraph(reformated_paragraphs, reformated_paragraph)
-                    self._append_paragraph(reformated_paragraphs, tokenized_s)
-                else:
-                    reformated_paragraph.extend(tokenized_s)
-                    p_start, p_end = 0, max_size
-                    while p_end <= len(reformated_paragraph):
-                        self._append_paragraph(reformated_paragraphs, reformated_paragraph[p_start:p_end])
-                        p_start, p_end = p_end, p_end + max_size
-                    reformated_paragraph = reformated_paragraph[p_start:p_end]
-                
-        if reformated_paragraph:
-            self._append_paragraph(reformated_paragraphs, reformated_paragraph)
-        return reformated_paragraphs
 
-
-class ReadingAgent:
-    def __init__(self, dataset:Dataset, llm:str | LLM="mistralai/Mistral-7B-Instruct-v0.2", model_type:str = 'gpt') -> None:
-        self.llm_server = LLMServer(llm)
-        self.model_type = model_type
-        self.dataset = dataset
-    
-
-    def gisting(self, example, pages, verbose=True):
-        article = self.dataset.get_article(example)
-        word_count = Dataset.count_words(article)
-
-        shortened_pages = []
-        for i, page in enumerate(pages):
-            prompt = GeneralPrompt.shorten('\n'.join(page))
-            response = self.llm_server(prompt)[0]
-            shortened_text = response.strip()
-            shortened_pages.append(shortened_text)
-            if verbose:
-                print("[gist] page {}:".format(i), shortened_text, flush=True)
-        shortened_article = '\n'.join(shortened_pages)
-        gist_word_count = Dataset.count_words(shortened_article)
-        if verbose:
-            print("Shortened article:\n", shortened_article, flush=True)
-        output:dict = copy.deepcopy(example)
-        output.update({'word_count': word_count, 'gist_word_count': gist_word_count, 'shortened_pages': shortened_pages, 'pages': pages})
-        if verbose:
-            print(f"compression rate {round(100.0 - gist_word_count/word_count*100, 2)}% ({gist_word_count}/{word_count})")
-        return output
-    
-    
-    def get_page_ids(self, response:str, max_page_num:int):
-        start = response.lower().index('look up Page'.lower()) + len('look up Page')
-        page_ids_str = response[start:].split('to', 1)[0].split()
-        page_ids = []
-        for p in page_ids_str:
-            if p.strip(',.[]').isnumeric():
-                page_id = int(p.strip(',.[]'))
-                if page_id >= 0 and page_id <= max_page_num:
-                    page_ids.append(page_id)
-        return page_ids
-
-    def main(self, query:str, page_file:str, gist_file:str, log_file:str=None, lookup_method:str='s'):
-        pages = read_json(page_file)
-        shortened_pages = read_json(gist_file)['shortened_pages']
-        expanded_shortened_pages = shortened_pages[:]
-        
-        log_info(log_file, 'query', query)
-        
-        if lookup_method == 'p':
-            menu = '\n'.join([f"<Page {i}>\n{shortened_text}" for i, shortened_text in enumerate(shortened_pages)])
-            log_info(log_file, 'menu', menu)
-
-            prompt_lookup = ReadingAgentPrompt.parallel_lookup(menu, query)
-            # log_info(log_file, 'lookup_prompt', prompt_lookup)
-
-            page_ids = []
-            response = self.llm_server(prompt=prompt_lookup)[0].strip()
-            log_info(log_file, 'retrieval_command', response)
-            
-            if 'look up Page'.lower() in response.lower():
-                page_ids = self.get_page_ids(response, len(pages) - 1)
-
-            # Memory expansion after look-up, replacing the target shortened page with the original page
-            if len(page_ids) > 0:
-                for page_id in page_ids:
-                    expanded_shortened_pages[page_id] = '\n'.join(pages[page_id])
-        else:
-            retrieved_passage_nums = []
-            for _ in range(7):
-                menu = '\n'.join([f"<Page {i}>\n{shortened_text}" for i, shortened_text in enumerate(expanded_shortened_pages)])
-                log_info(log_file, 'menu', menu)
-                
-                # prompt_lookup = prompt_sequential_lookup_template.format(menu, query, ', '.join(map(str, retrieved_passage_nums)))
-                prompt_lookup = ReadingAgentPrompt.sequential_lookup(menu, query.split('\n')[0], ', '.join(map(str, retrieved_passage_nums)))
-                # log_info(log_file, 'lookup_prompt', prompt_lookup)
-                
-                response = self.llm_server(prompt=prompt_lookup)[0].strip()
-                log_info(log_file, 'retrieval_command', response)
-                
-                # page_id:List[str] = re.findall(r'page \d+', response.lower())
-                
-                if 'STOP' in response or 'look up Page'.lower() not in response.lower():
-                    log_info(log_file, 're-read complete', 'yes')
-                    break
-                else:
-                    # Memory expansion after look-up, replacing the target shortened page with the original page
-                    if len(retrieved_passage_nums) == 6:
-                        log_info(log_file, 're-read complete', 'no')
-                    else:
-                        page_ids = self.get_page_ids(response, len(pages) - 1)
-                        new_page_id_added = False
-                        for page_id in page_ids:
-                            if page_id not in retrieved_passage_nums:
-                                expanded_shortened_pages[page_id] = '\n'.join(pages[page_id])
-                                retrieved_passage_nums.append(page_id)
-                                log_info(log_file, 'retrieved_pids', retrieved_passage_nums)
-                                new_page_id_added = True
-                                break
-                        if not new_page_id_added:
-                            log_info(log_file, 're-read complete', 'yes')
-                            break
-
-        expanded_shortened_article = '\n'.join(expanded_shortened_pages)
-        log_info(log_file, 'retrieval_result', expanded_shortened_article)
-
-        response = self.llm_server(prompt=GeneralPrompt.answer(self.dataset.question_type, expanded_shortened_article, query, self.dataset.answer_format))[0]
-        response = response.strip()
-        log_info(log_file, 'generation', response)
-    
-    
 class LongDoc:
     
-    def __init__(self, retriever:Retriever, llm:str | LLM="mistralai/Mistral-7B-Instruct-v0.2") -> None:
-        # self.dataset = dataset
-        if llm:
-            self.llm_server = LLMServer(llm)
-        self.retriever = retriever
+    def __init__(self, factory:Factory, chunk_info_file:str=None) -> None:
+        self.factory = factory
         self.nlp = spacy.load('en_core_web_lg')
+        if chunk_info_file:
+            self.chunk_infos = [ChunkInfo.parse_obj(line) for line in read_json(chunk_info_file)]
+            self.build_relation_graph()
+            self.build_lexical_store()
         
-    def retrieve_descriptions(self, notes:List[ChunkInfo], relation_graph:nx.Graph, target_ents:List[str], match_num:int=5, r_num:int=1, retrieval_guaranteed:bool=False):
-        ent2pids = defaultdict(list)
-        pid:int
-        for pid, note in enumerate(notes):
-            for ent in note.ent_descriptions.keys():
-                ent2pids[ent].append(pid)
-        all_ents = list(ent2pids.keys())
-        target_ents_emb:np.ndarray = self.retriever.embed_paragraphs(target_ents, True)
-        refer_ents_emb:np.ndarray = self.retriever.embed_paragraphs(all_ents, True)
-        list_ent = LongDocPrompt.ListEnt()
-        ent_map = list_ent.match_entities(target_ents, all_ents, target_ents_emb, refer_ents_emb, match_num, retrieval_guaranteed, self.retriever.syn_similarity)
-        prev_ent_descriptions:Dict[int, Dict[str, str]] = defaultdict(dict)
-        for _, mentions in ent_map.items():
-            for mention in mentions:
-                for pid in ent2pids[mention][-r_num:]:
-                    prev_ent_descriptions[pid][mention] = notes[pid].ent_descriptions[mention]
-        prev_relation_descriptions:Dict[int, List[Tuple[List[str], str]]] = defaultdict(list)
-        all_nodes = list(relation_graph.nodes)
-        refer_ents_emb:np.ndarray = self.retriever.embed_paragraphs(all_nodes, True)
-        node_map = list_ent.match_entities(target_ents, all_nodes, target_ents_emb, refer_ents_emb, match_num, retrieval_guaranteed, self.retriever.syn_similarity)
-        sub_nodes = set()
-        for ent, mentions in node_map.items():
-            sub_nodes.update(mentions)
-        sub_graph:nx.Graph = relation_graph.subgraph(sub_nodes)
-        visited_relation_descriptions = set()
-        for e1, e2, pids in sub_graph.edges.data('pids'):
-            for pid in pids[-r_num:]:
-                for rid, (related_ents, relation_description) in enumerate(notes[pid].relation_descriptions):
-                    if e1 in related_ents and e2 in related_ents and (pid, rid) not in visited_relation_descriptions:
-                        prev_relation_descriptions[pid].append((related_ents, relation_description))
-                        visited_relation_descriptions.add((pid, rid))
-        return prev_ent_descriptions, prev_relation_descriptions
+    def build_index(self, article:str, chunk_info_file:str=None):
+        pieces = self.factory.split_text(article)
+        print('generate_statements')
+        chunks, statements = self.generate_statements(pieces)
+        # statements = [ci.statements for ci in chunk_infos]
+        print('end')
+        chunk_infos = [ChunkInfo(i=i, chunk_text=chunk) for i, chunk in enumerate(chunks)]
+        missing_chunk_ids = [ci.i for ci in chunk_infos if not ci.statements]
+        attempt = 0
+        while missing_chunk_ids:
+            print(attempt, len(missing_chunk_ids))
+            attempt += 1
+            if len(missing_chunk_ids) == len(statements):
+                entities = self.extract_entities(statements)
+                for cid, (statement_list, entity_list) in enumerate(zip(statements, entities)):
+                    if len(statement_list) == len(entity_list):
+                        chunk_infos[cid].statements, chunk_infos[cid].entities = statement_list, entity_list
+            else:
+                temp_stm_groups = []
+                for missing_ci in missing_chunk_ids:
+                    temp_stms = statements[missing_ci]
+                    split = np.random.randint(len(statements) // 3, len(statements) * 2 // 3)
+                    temp_stm_groups.append(temp_stms[:split])
+                    temp_stm_groups.append(temp_stms[split:])
+                entities = self.extract_entities(temp_stm_groups)
+                for sid in range(len(temp_stm_groups)//2):
+                    if len(temp_stm_groups[sid * 2]) == len(entities[sid * 2]) and len(temp_stm_groups[sid * 2 + 1]) == len(entities[sid * 2 + 1]):
+                        chunk_infos[missing_chunk_ids[sid]].statements, chunk_infos[missing_chunk_ids[sid]].entities = temp_stm_groups[sid * 2] + temp_stm_groups[sid * 2 + 1], entities[sid * 2] + entities[sid * 2 + 1]
+            missing_chunk_ids = [ci.i for ci in chunk_infos if not ci.statements]
 
-    def collect_entities_from_text(self, text:str):
+        for ci in chunk_infos:
+            for sid, statement in enumerate(ci.statements):
+                addition_ents, keywords = self.collect_keywords_from_text(statement)
+                ci.keywords.append(keywords)
+                for addition_ent in addition_ents:
+                    if all([addition_ent.lower() not in ent.lower() for ent in ci.entities[sid]]):
+                        ci.entities[sid].append(addition_ent)
+        
+        self.chunk_infos = chunk_infos
+        self.build_relation_graph()
+        self.build_lexical_store()
+        if chunk_info_file:
+            write_json(chunk_info_file, [ci.dict() for ci in chunk_infos])
+
+    def collect_keywords_from_text(self, text:str):
+        
+        def trim_det_adv(noun_chunk:spacy.tokens.Span):
+            for tid, t in enumerate(noun_chunk):
+                if t.pos_ not in ['DET', 'ADV']:
+                    return noun_chunk[tid:]
+                
         doc = self.nlp(text)
-        ncs = [nc if nc[0].pos_ != 'DET' else nc[1:] for nc in doc.noun_chunks if nc.root.pos_ not in ['NUM', 'PRON']]
-        ents = [ent if ent[0].pos_ != 'DET' else ent[1:] for ent in doc.ents if ent.root.pos_ not in ['NUM', 'PRON']]
+        ncs = [trim_det_adv(nc) for nc in doc.noun_chunks if nc.root.pos_ not in ['NUM', 'PRON']]
+        ents = [trim_det_adv(ent) for ent in doc.ents if ent.root.pos_ not in ['NUM', 'PRON']]   
+        keywords = [(t.i, t.i+1) for t in doc if t.pos_ in ['VERB', 'ADJ', 'ADV']]
         ncs_spans = [(nc.start, nc.end) for nc in ncs]
         ents_spans = [(ent.start, ent.end) for ent in ents]
         nc_id, eid = 0, 0
@@ -307,198 +143,161 @@ class LongDoc:
                 updated_spans.append(span)
         updated_spans = [span for span in updated_spans if any([t.pos_ in ['NOUN', 'PROPN'] for t in doc[span[0]:span[1]]])]
         updated_spans = [span if doc[span[0]].pos_ != 'PRON' else (span[0]+1, span[1]) for span in updated_spans]
-        ent_candidates = [doc[span[0]:span[1]].text if (span[1] - span[0]) > 1 else doc[span[0]].lemma_ for span in updated_spans]
+        ent_candidates = [doc[span[0]:span[1]].text for span in updated_spans]
         ent_candidates = [ent.strip('"') for ent in ent_candidates]
         ent_candidates = [ent for ent in ent_candidates if len(ent) >= 2]
-        return ent_candidates
-    
-    def collect_global_entities(self, paragraphs:List[str], return_ent_class:bool=False):
-        ent_candidates_all = list()
-        ent_candidates_pid = list()
-        for pid, passage in enumerate(paragraphs):
-            ent_candidates = self.collect_entities_from_text(passage)
-            ent_candidates_all.extend(ent_candidates)
-            ent_candidates_pid.extend([pid] * len(ent_candidates))
-        ent_candidates_all_emb = self.retriever.embed_paragraphs(ent_candidates_all)
-        ent_candidates_pid = np.array(ent_candidates_pid)
-        db = DBSCAN(eps=self.retriever.syn_dist, min_samples=2, metric="cosine").fit(ent_candidates_all_emb)
-        ent_class = defaultdict(set)
-        for class_id in range(db.labels_.max() + 1):
-            if len(set(ent_candidates_pid[db.labels_ == class_id])) >= 2:
-                ent_class[class_id]
-        ent_candidates_per_passage = defaultdict(set)
-        for label, ent, pid in zip(db.labels_, ent_candidates_all, ent_candidates_pid):
-            if label in ent_class:
-                ent_class[label].add(ent)
-                ent_candidates_per_passage[pid].add(ent)
-        return ent_candidates_per_passage if not return_ent_class else (ent_candidates_per_passage, ent_class)
-    
-    # def index_text(self, paragraphs:List[str], w_note:bool=True, match_num:int=5, r_num:int=1):
-    #     # Collect useful entities
-    #     ent_candidates_per_passage = self.collect_global_entities(paragraphs)
-    #     results:List[ChunkInfo] = []
-    #     relation_graph = nx.Graph()
-    #     for cur_pid, paragraph in enumerate(tqdm(paragraphs)):
-    #         chunk_info = ChunkInfo(cur_pid, paragraph)
-    #         if results and w_note:
-    #             summary_recap = {pid: results[pid].summary for pid in range(max(len(results)-r_num, 0), len(results))}
-    #             chunk_info.prev_summaries = summary_recap
-                
-    #         if cur_pid not in ent_candidates_per_passage:
-    #             if results and w_note:
-    #                 list_entity_prompt = LongDocPrompt.list_entity_w_note(chunk_info.recap_str, paragraph)
-    #             else:
-    #                 list_entity_prompt = LongDocPrompt.list_entity(paragraph)
-    #             # Extract important entities
-    #             chat_response = self.llm_server(list_entity_prompt, 5, 0.7)[0]
-    #             important_ents = LongDocPrompt.parse_entities(chat_response, lambda x: self.retriever.embed_paragraphs(x, True), self.retriever.syn_similarity)
-    #         else:
-    #             important_ents = ent_candidates_per_passage[cur_pid]
-    #         chunk_info.important_ents = list(important_ents)
-            
-    #         # Generate entity description, summary, relation description
-    #         if results and w_note:
-    #             chunk_info.prev_ent_descriptions, chunk_info.prev_relation_descriptions = self.retrieve_descriptions(results, relation_graph, chunk_info.important_ents, match_num, r_num)
-    #             recap_str = chunk_info.recap_str
-    #             ent_description_prompt = LongDocPrompt.ent_description_w_note(recap_str, paragraph, chunk_info.important_ents)
-    #             summary_prompt = LongDocPrompt.shorten_w_note(recap_str, paragraph)
-    #             relation_description_prompt = LongDocPrompt.relation_description_w_note(recap_str, paragraph, chunk_info.important_ents)
-    #         else:
-    #             ent_description_prompt = LongDocPrompt.ent_description(paragraph, chunk_info.important_ents)
-    #             summary_prompt = LongDocPrompt.shorten(paragraph)
-    #             relation_description_prompt = LongDocPrompt.relation_description(paragraph, chunk_info.important_ents)
-            
-    #         ent_description, relation_description, summary = self.llm_server([ent_description_prompt, relation_description_prompt, summary_prompt])
-    #         ent_description, relation_description, summary = ent_description[0], relation_description[0], summary[0]
-    #         chunk_info.summary = summary
-    #         chunk_info.ent_descriptions = LongDocPrompt.parse_ent_description(ent_description, chunk_info.important_ents)
-    #         chunk_info.relation_descriptions = LongDocPrompt.parse_relation_description(relation_description, chunk_info.important_ents)
-    #         results.append(chunk_info)
-    #         for related_ents, _ in chunk_info.relation_descriptions:
-    #             for ent1, ent2 in itertools.combinations(related_ents, 2):
-    #                 if not relation_graph.has_edge(ent1, ent2):
-    #                     relation_graph.add_edge(ent1, ent2, pids=[])
-    #                 temp_pids:List[int] = relation_graph.get_edge_data(ent1, ent2)['pids']
-    #                 if cur_pid not in temp_pids:
-    #                     temp_pids.append(cur_pid)
-    #     return results
-    
-    # def index_text_into_map(self, paragraphs:List[str], nbr_max_dist:int=1):
-    #     # Extract important entities
-    #     print('Collect important entities')
-    #     collect_start_time = time()
-    #     important_ents_list = [
-    #         LongDocPrompt.parse_entities(
-    #             chat_response, 
-    #             lambda x: self.retriever.embed_paragraphs(x, True), 
-    #             self.retriever.syn_similarity)
-    #         for chat_response in self.llm_server([LongDocPrompt.list_entity(p) for p in paragraphs], 5, 0.7)
-    #     ]
-    #     print('Collect important entities done', time() - collect_start_time)
         
-    #     results = [ChunkInfo(cur_pid, paragraph, important_ents=important_ents) for cur_pid, (paragraph, important_ents) in enumerate(zip(paragraphs, important_ents_list))]
-    #     raw = {}
-    #     for nbr_dist in range(nbr_max_dist + 1):
-    #         relation_description_prompts = [
-    #             LongDocPrompt.pairwise_relation_description(
-    #                 ' '.join(paragraphs[cur_pid - nbr_dist : cur_pid + 1]), 
-    #                 results[cur_pid - nbr_dist].important_ents, 
-    #                 results[cur_pid].important_ents
-    #             )
-    #             for cur_pid in range(nbr_dist, len(paragraphs))
-    #         ]
-    #         temp_raw = []
-    #         for cur_pid, relation_description in zip(range(nbr_dist, len(paragraphs)), self.llm_server(relation_description_prompts)):
-    #             temp_raw.append((cur_pid, relation_description[0]))
-    #             relation_descriptions = LongDocPrompt.parse_pairwise_relation_description(relation_description[0], results[cur_pid - nbr_dist].important_ents, results[cur_pid].important_ents)
-    #             if nbr_dist == 0:
-    #                 results[cur_pid].relation_descriptions = relation_descriptions
-    #             else:
-    #                 results[cur_pid].prev_relation_descriptions[-nbr_dist] = relation_descriptions
-    #         raw[nbr_dist] = temp_raw
-    #     return results, raw
+        keywords = updated_spans + keywords
+        keywords.sort(key=lambda x: x[0])
+        kw_candidates = [doc[span[0]:span[1]].text for span in keywords]
+        kw_candidates = [ent.strip('"') for ent in kw_candidates]
+        return ent_candidates, kw_candidates
     
-    # def lossless_index(self, pages:List[str], rewrite_chunk_num:int=5, prev_chunk_num:int=5, post_chunk_num:int=5, target:str='relation'):
-    #     missed_chunk_ids:List[List[int]] = []
-    #     batch_start_ends = []
-    #     summaries:List[dict] = []
-    #     for batch_start in range(0, len(pages), rewrite_chunk_num):
-    #         prev_start = max(batch_start - prev_chunk_num, 0)
-    #         batch_end = min(batch_start + rewrite_chunk_num, len(pages))
-    #         post_end = min(batch_end + post_chunk_num, len(pages))
-    #         chunk_start = batch_start - prev_start
-    #         chunk_end = batch_end - prev_start
-    #         chunk_ids = list(range(chunk_start, chunk_end))
-    #         missed_chunk_ids.append(chunk_ids)
-    #         batch_start_ends.append((prev_start, post_end))
-    #         summaries.append({})
+    def parse_statements(self, text:str):
+        i = 1
+        statements:List[str] = []
+        for line in text.strip().splitlines():
+            if line.startswith(f'{i}. '):
+                statements.append(line.split(' ', 1)[1].strip())
+                i += 1
+        return statements
 
-    #     while any(missed_chunk_ids):
-    #         temp_prompts = []
-    #         temp_summaries:List[dict] = []
-    #         temp_chunk_ids:List[list] = []
-    #         for chunk_ids, (batch_start, batch_end), summary in zip(missed_chunk_ids, batch_start_ends, summaries):
-    #             if chunk_ids:
-    #                 chunk_wise_func = LongDocPrompt.chunk_wise_rewrite if target == 'relation' else LongDocPrompt.chunk_wise_entity_extraction
-    #                 temp_prompts.append(chunk_wise_func(pages[batch_start:batch_end], chunk_ids))
-    #                 temp_summaries.append(summary)
-    #                 temp_chunk_ids.append(chunk_ids)
-
-    #         print(len(temp_prompts))
-    #         responses = self.llm_server(temp_prompts)
-
-    #         for response, chunk_ids, summary in zip(responses, temp_chunk_ids, temp_summaries):
-    #             chunk_wise_parse_func = LongDocPrompt.parse_chunk_wise_rewrite if target == 'relation' else LongDocPrompt.parse_chunk_wise_entity_extraction
-    #             new_summaries = chunk_wise_parse_func(response[0])
-    #             summarized_chunk_ids = [chunk_id for chunk_id in chunk_ids if chunk_id in new_summaries]
-    #             for chunk_id in summarized_chunk_ids:
-    #                 summary[chunk_id] = new_summaries[chunk_id]
-    #                 chunk_ids.remove(chunk_id)
-        
-    #     all_summary:List[str] = []
-    #     for summary in summaries:
-    #         cid_sum_pairs = list(summary.items())
-    #         cid_sum_pairs.sort(key=lambda x: x[0])
-    #         all_summary.extend([s for _, s in cid_sum_pairs])
-        
-    #     return all_summary
+    def parse_entities(self, text:str):
+        i = 1
+        list_of_ent_list:List[List[str]] = []
+        for line in text.strip().splitlines():
+            line = line.strip()
+            if line.startswith(f'{i}. '):
+                temp_ent_list = line.split(' ', 1)[1].strip().split(',')
+                ent_list:List[str] = []
+                incomplete_ent = []
+                for ent in temp_ent_list:
+                    if '(' in ent and ')' not in ent:
+                        incomplete_ent.append(ent)
+                    elif '(' not in ent and ')' in ent:
+                        incomplete_ent.append(ent)
+                        ent_list.append(','.join(incomplete_ent).strip().strip('.'))
+                        incomplete_ent.clear()
+                    elif incomplete_ent:
+                        incomplete_ent.append(ent)
+                    else:
+                        ent_list.append(ent.strip().strip('.'))
+                ent_list = [ent.split(':', 1)[1].strip() if ent.startswith('Entities:') else ent for ent in ent_list]
+                ent_list = [self.clean_entity(ent) for ent in ent_list]
+                ent_list = [ent for ent in ent_list if ent]
+                list_of_ent_list.append(ent_list)
+                i += 1
+        return list_of_ent_list
     
-    def build_relation_graph(self, notes:List[ChunkInfo]):
+    def build_relation_graph(self):
         relation_graph = nx.Graph()
-        for cur_pid, chunk_info in enumerate(notes):
-            for related_ents, _ in chunk_info.relation_descriptions:
+        # semantic edges
+        for ci in self.chunk_infos:
+            for sid, related_ents in enumerate(ci.entities):
+                loc = (ci.i, sid)
+                # Insert node locs
+                for e in related_ents:
+                    if not relation_graph.has_node(e):
+                        relation_graph.add_node(e, locs=[], norm=' '.join(self.normalize_entity(e)))
+                    ent_locs:list = relation_graph.nodes[e]['locs']
+                    if loc not in ent_locs:
+                        ent_locs.insert(0, loc)
                 for ent1, ent2 in itertools.combinations(related_ents, 2):
                     if not relation_graph.has_edge(ent1, ent2):
-                        relation_graph.add_edge(ent1, ent2, pids=[])
-                    temp_pids:List[int] = relation_graph.get_edge_data(ent1, ent2)['pids']
-                    if cur_pid not in temp_pids:
-                        temp_pids.append(cur_pid)
-        return relation_graph
+                        relation_graph.add_edge(ent1, ent2, locs=[])
+                    edge_locs:list = relation_graph[ent1][ent2]['locs']
+                    edge_locs.append((loc, loc))
+        
+        self.normal2ents:Dict[str, List[str]] = defaultdict(list)
+        for ent, normal in relation_graph.nodes(data='norm'):
+            self.normal2ents[normal].append(ent)
+        normals = list(self.normal2ents)
+        normals.sort()
+        self.ent_corpus = [ent.split() for ent in normals]
+        self.ent_bm25 = BM25Okapi(self.ent_corpus)
+        
+        for normal in self.normal2ents:
+            # Add edges between entities that have the same norm
+            for ent1, ent2 in itertools.combinations(self.normal2ents[normal], 2):
+                if not relation_graph.has_edge(ent1, ent2):
+                    relation_graph.add_edge(ent1, ent2, locs=[])
+                edge_locs:list = relation_graph[ent1][ent2]['locs']
+                edge_locs.extend(itertools.product(relation_graph.nodes[ent1]['locs'], relation_graph.nodes[ent2]['locs']))
+            # Add edges between entities that have similar norms
+            scores:List[float] = self.ent_bm25.get_scores(normal.split()).tolist()
+            for score, similar_normal in zip(scores, self.ent_corpus):
+                if score > 0:
+                    similar_normal = ' '.join(similar_normal)
+                    if normal != similar_normal:
+                        for ent1, ent2 in itertools.product(self.normal2ents[normal], self.normal2ents[similar_normal]):
+                            if not relation_graph.has_edge(ent1, ent2):
+                                relation_graph.add_edge(ent1, ent2, locs=[])
+                            edge_locs:list = relation_graph[ent1][ent2]['locs']
+                            edge_locs.extend(itertools.product(relation_graph.nodes[ent1]['locs'], relation_graph.nodes[ent2]['locs']))
+        
+        self.graph = relation_graph
     
-
+    def build_lexical_store(self):
+        self.raw_corpus = [self.normalize_text(ci.chunk_text) for ci in self.chunk_infos]
+        self.raw_bm25 = BM25Okapi(self.raw_corpus)
+        
+    def lexical_retrieval_chunks(self, query:str, n:int=5):
+        chunk_idxs = self.bm25_retrieve(self.normalize_text(query), self.raw_bm25)
+        return [(self.chunk_infos[idx].chunk_text, idx) for idx in chunk_idxs][:n]
     
-def slide_encode(pages:List[str], retriever:Retriever, window_size:int=3):
-    padded_pages = ([''] * (window_size-1)) + pages + ([''] * (window_size-1))
-    p_input_ids = [retriever.retriever_tokenizer(p)['input_ids'][1:-1] for p in pages]
-    batched_pids = [[pid_ - window_size + 1 for pid_ in range(pid, pid + window_size) if padded_pages[pid_]] for pid in range(len(padded_pages) - window_size + 1)]
-    reformed_pages = [' '.join([pages[pid] for pid in pids]) for pids in batched_pids]
-    p_emb = retriever.embed_paragraphs(reformed_pages, complete_return=True)
-    pid2embs = [[] for p in pages]
-    pid2lhs = [[] for p in pages]
-    for temp_input_ids, temp_lhs, pids in zip(p_emb.input_ids, p_emb.last_hidden_states, batched_pids):
-        p_start = 1
-        for pid in pids:
-            p_len = len(p_input_ids[pid])
-            p_end = p_start + p_len
-            if temp_input_ids[p_start:p_end].tolist() != p_input_ids[pid]: # align check
-                print('fail')
-                break
-            pid2lhs[pid].append(temp_lhs[p_start:p_end])
-            pid2embs[pid].append(temp_lhs[p_start:p_end].mean(0))
-            p_start = p_end
-    pid2embs = [np.vstack(embs) for embs in pid2embs]
-    pid2lhs = [np.concatenate(np.expand_dims(lhs, 0), 0) for lhs in pid2lhs]
-    return p_input_ids, pid2embs, pid2lhs
+    def lexical_retrieval_entities(self, query:str, n:int=5):
+        tokenized_query = self.normalize_entity(query)
+        normal_idxs = self.bm25_retrieve(tokenized_query, self.ent_bm25)
+        candidate_normals = [' '.join(self.ent_corpus[idx]) for idx in normal_idxs]
+        temp_ents = []
+        for normal in candidate_normals:
+            temp_ents.extend(self.normal2ents[normal])
+        temp_ent_corpus = [self.split_lower_text(ent) for ent in temp_ents]
+        temp_bm25 = BM25Okapi(temp_ent_corpus)
+        ent_idxs = self.bm25_retrieve(tokenized_query, temp_bm25)
+        return [temp_ents[idx] for idx in ent_idxs][:n]
+    
+    def exact_match_chunks(self, query:str):
+        normalized_query = ' '.join(self.normalize_text(query))
+        return [(self.chunk_infos[idx].chunk_text, idx) for idx, normalized_chunk in enumerate(self.raw_corpus) if normalized_query in ' '.join(normalized_chunk)]
+        
+    def generate_statements(self, pieces:List[str], chunk_size:int=5, summary_size:int=25, overlap:int=1):
+        summary_chunks = concate_with_overlap(pieces, summary_size, overlap=overlap)
+        summaries = self.factory.llm.generate([[HumanMessage(content=summary_prompt.format(chunk=' '.join(summary_chunk)))] for summary_chunk in summary_chunks])
+        prompts = []
+        chunks:List[str] = []
+        for summary_chunk, summary in zip(summary_chunks, summaries.generations):
+            temp_summary_size = min(summary_size, len(summary_chunk))
+            summary_chunk = summary_chunk[:temp_summary_size]
+            for batch_start in range((temp_summary_size + 1) // chunk_size):
+                chunk = ' '.join(summary_chunk[batch_start * chunk_size : (batch_start + 1) * chunk_size])
+                prompts.append(statement_prompt.format(summary=summary[0].text, chunk=chunk))
+                chunks.append(chunk)
+        return chunks, [self.parse_statements(gen[0].text) for gen in self.factory.llm.generate([[HumanMessage(content=prompt)] for prompt in prompts]).generations]
+        
+    def clean_entity(self, ent_text:str):
+        ent_doc = self.nlp(ent_text, disable=['parser', 'ner'])
+        for tid, t in enumerate(ent_doc):
+            if t.pos_ not in ['DET', 'CCONJ', 'PRON']:
+                return ent_doc[tid:].text
+            
+    def normalize_entity(self, ent_text:str):
+        # return [t.text.lower() if t.pos_ != 'NOUN' else t.lemma_.lower() for t in self.nlp(ent_text, disable=['parser', 'ner']) if t.pos_ not in ['DET', 'PUNCT', 'ADP', 'SCONJ', 'PRON', 'CCONJ', 'PART', 'AUX']]
+        return [t.text.lower() if t.pos_ != 'NOUN' else t.lemma_.lower() for t in self.nlp(ent_text, disable=['parser', 'ner']) if not (t.is_stop or t.pos_ == "PUNCT")]
+    
+    def normalize_text(self, text:str):
+        return [t.lemma_.lower() if t.pos_ in ['NOUN', 'VERB'] else t.text.lower() for t in self.nlp(text, disable=['ner', 'parser']) if not t.is_stop]
+    
+    def split_lower_text(self, text:str) -> List[str]:
+        return [t.text.lower() for t in self.nlp(text, disable=['ner', 'parser'])]
+    
+    def bm25_retrieve(self, tokenized_query:List[str], bm25:BM25Okapi):
+        index_score_pairs = [(idx, score) for idx, score in enumerate(bm25.get_scores(tokenized_query)) if score > 0]
+        index_score_pairs.sort(key=lambda x: x[1], reverse=True)
+        return [idx for idx, _ in index_score_pairs]
+        
+    def extract_entities(self, statements:List[List[str]]):
+        return [self.parse_entities(gen[0].text) for gen in self.factory.llm.generate([[HumanMessage(content='List the entities in each line of the following statements.\n\nStatements:\n' + '\n'.join([f'{sid+1}. {s}' for sid, s in enumerate(statement)]))] for statement in statements]).generations]
 
 if __name__ == '__main__':
     
@@ -506,49 +305,49 @@ if __name__ == '__main__':
     import os
     from pathlib import Path
     
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--task', type=str, default='quality', choices=['narrativeqa', 'quality', 'musique'])
-    parser.add_argument('--r_tool', type=str, default='index', choices=['dpr', 'index', 'gist'])
-    parser.add_argument('--reasoning_style', type=str, default='p', choices=['s', 'p'])
-    args = parser.parse_args()
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument('--task', type=str, default='quality', choices=['narrativeqa', 'quality', 'musique'])
+    # parser.add_argument('--r_tool', type=str, default='index', choices=['dpr', 'index', 'gist'])
+    # parser.add_argument('--reasoning_style', type=str, default='p', choices=['s', 'p'])
+    # args = parser.parse_args()
 
-    context_type = 'novel'
+    # context_type = 'novel'
 
-    task_name = args.task
-    r_tool = args.r_tool
-    reasoning_style = args.reasoning_style
+    # task_name = args.task
+    # r_tool = args.r_tool
+    # reasoning_style = args.reasoning_style
     
-    llm = LLM()
-    retriever = Retriever()
-    # llm = 'mistralai/Mistral-7B-Instruct-v0.2'
+    # llm = LLM()
+    # retriever = Retriever()
+    # # llm = 'mistralai/Mistral-7B-Instruct-v0.2'
     
-    if task_name == 'narrativeqa':
-        dataset = NarrativeQADataset(llm)
-    elif task_name == 'musique':
-        dataset = MuSiQueDataset(llm)
-    else:
-        dataset = QualityDataset(llm, 'dev')
+    # if task_name == 'narrativeqa':
+    #     dataset = NarrativeQADataset(llm)
+    # elif task_name == 'musique':
+    #     dataset = MuSiQueDataset(llm)
+    # else:
+    #     dataset = QualityDataset(llm, 'dev')
         
-    longdoc = LongDoc(dataset, retriever, llm)
-    reading_agent = ReadingAgent(dataset, llm)
+    # longdoc = LongDoc(dataset, retriever, llm)
+    # reading_agent = ReadingAgent(dataset, llm)
     
-    for task_i in range(0, 10):
-        print(f'{task_i} start')
+    # for task_i in range(0, 10):
+    #     print(f'{task_i} start')
         
-        index_file = os.path.join(dataset.data_dir, f'rel_index_{task_i}.json')
-        page_file = os.path.join(dataset.data_dir, f'pages_{task_i}.json')
-        gist_file = os.path.join(dataset.data_dir, f'gist_{task_i}.json')
-        log_file = os.path.join(dataset.data_dir, f'generation_wo_c_{r_tool}_{reasoning_style}_{task_i}.jsonl')
-        questions, _ = dataset.get_questions_and_answers(dataset.data[task_i])
-        for qid, query in enumerate(questions):
-            if r_tool == 'gist':
-                reading_agent.main(query, page_file, gist_file, log_file, reasoning_style)
-            else:
-                if reasoning_style == 'p':
-                    longdoc.main(query, index_file, log_file, r_tool)
-                else:
-                    longdoc.self_rag(query, page_file, log_file)
+    #     index_file = os.path.join(dataset.data_dir, f'rel_index_{task_i}.json')
+    #     page_file = os.path.join(dataset.data_dir, f'pages_{task_i}.json')
+    #     gist_file = os.path.join(dataset.data_dir, f'gist_{task_i}.json')
+    #     log_file = os.path.join(dataset.data_dir, f'generation_wo_c_{r_tool}_{reasoning_style}_{task_i}.jsonl')
+    #     questions, _ = dataset.get_questions_and_answers(dataset.data[task_i])
+    #     for qid, query in enumerate(questions):
+    #         if r_tool == 'gist':
+    #             reading_agent.main(query, page_file, gist_file, log_file, reasoning_style)
+    #         else:
+    #             if reasoning_style == 'p':
+    #                 longdoc.main(query, index_file, log_file, r_tool)
+    #             else:
+    #                 longdoc.self_rag(query, page_file, log_file)
             
-        print(f'{task_i} end')
+    #     print(f'{task_i} end')
 
         

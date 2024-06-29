@@ -1,19 +1,11 @@
-
-from nltk import sent_tokenize
-from datasets import load_dataset
-
-from .models import *
 from .base_utils import *
-from .prompt import GeneralPrompt
 
 class Dataset:
-    def __init__(self, dataset_name:str, llm:str | LLM="mistralai/Mistral-7B-Instruct-v0.2", split:str='train') -> None:
+    def __init__(self, dataset_name:str, split:str='train') -> None:
         self.dataset_name = dataset_name
         self.answer_format = None
         self.question_type = None
         self.data = []
-        if llm:
-            self.llm_server = LLMServer(llm)
         self.split = split
         self.load_split()
         self.data_dir = Path(os.path.join(self.dataset_name, self.split))
@@ -65,57 +57,57 @@ class Dataset:
         raise NotImplementedError
 
 
-    def pagination(
-        self,
-        article:str,
-        word_limit=600,
-        start_threshold=280,
-        verbose=True,
-        allow_fallback_to_last=True
-    ):
-        paragraphs = self.paragraph_parser(article)
+    # def pagination(
+    #     self,
+    #     article:str,
+    #     word_limit=600,
+    #     start_threshold=280,
+    #     verbose=True,
+    #     allow_fallback_to_last=True
+    # ):
+    #     paragraphs = self.paragraph_parser(article)
 
-        i = 0
-        pages = []
-        while i < len(paragraphs):
-            preceding = "" if i == 0 else "...\n" + '\n'.join(pages[-1])
-            passage = [paragraphs[i]]
-            wcount = self.count_words(paragraphs[i])
-            j = i + 1
-            while wcount < word_limit and j < len(paragraphs):
-                wcount += self.count_words(paragraphs[j])
-                if wcount >= start_threshold:
-                    passage.append(f"<{j}>")
-                passage.append(paragraphs[j])
-                j += 1
-            passage.append(f"<{j}>")
-            end_tag = "" if j == len(paragraphs) else paragraphs[j] + "\n..."
+    #     i = 0
+    #     pages = []
+    #     while i < len(paragraphs):
+    #         preceding = "" if i == 0 else "...\n" + '\n'.join(pages[-1])
+    #         passage = [paragraphs[i]]
+    #         wcount = self.count_words(paragraphs[i])
+    #         j = i + 1
+    #         while wcount < word_limit and j < len(paragraphs):
+    #             wcount += self.count_words(paragraphs[j])
+    #             if wcount >= start_threshold:
+    #                 passage.append(f"<{j}>")
+    #             passage.append(paragraphs[j])
+    #             j += 1
+    #         passage.append(f"<{j}>")
+    #         end_tag = "" if j == len(paragraphs) else paragraphs[j] + "\n..."
 
-            pause_point = None
-            if wcount < 350:
-                pause_point = len(paragraphs)
-            else:
-                prompt = GeneralPrompt.pagination(preceding, '\n'.join(passage), end_tag)
-                response = self.llm_server(prompt=prompt)[0].strip()
-                pause_point = self.parse_pause_point(response)
-                if pause_point and (pause_point <= i or pause_point > j):
-                    print(f"prompt:\n{prompt},\nresponse:\n{response}\n")
-                    print(f"i:{i} j:{j} pause_point:{pause_point}")
-                    pause_point = None
-                if pause_point is None:
-                    if allow_fallback_to_last:
-                        pause_point = j
-                    else:
-                        raise ValueError(f"prompt:\n{prompt},\nresponse:\n{response}\n")
+    #         pause_point = None
+    #         if wcount < 350:
+    #             pause_point = len(paragraphs)
+    #         else:
+    #             prompt = GeneralPrompt.pagination(preceding, '\n'.join(passage), end_tag)
+    #             response = self.llm_server(prompt=prompt)[0].strip()
+    #             pause_point = self.parse_pause_point(response)
+    #             if pause_point and (pause_point <= i or pause_point > j):
+    #                 print(f"prompt:\n{prompt},\nresponse:\n{response}\n")
+    #                 print(f"i:{i} j:{j} pause_point:{pause_point}")
+    #                 pause_point = None
+    #             if pause_point is None:
+    #                 if allow_fallback_to_last:
+    #                     pause_point = j
+    #                 else:
+    #                     raise ValueError(f"prompt:\n{prompt},\nresponse:\n{response}\n")
 
-            page = paragraphs[i:pause_point]
-            pages.append(page)
-            if verbose:
-                print(f"Paragraph {i}-{pause_point-1}", page)
-            i = pause_point
-        if verbose:
-            print(f"[Pagination] Done with {len(pages)} pages")
-        return pages
+    #         page = paragraphs[i:pause_point]
+    #         pages.append(page)
+    #         if verbose:
+    #             print(f"Paragraph {i}-{pause_point-1}", page)
+    #         i = pause_point
+    #     if verbose:
+    #         print(f"[Pagination] Done with {len(pages)} pages")
+    #     return pages
     
     def eval(self, gen:str, answer:str):
         raise NotImplementedError
@@ -178,8 +170,8 @@ class QualityDataset(Dataset):
 
     choices = ['(A)', '(B)', '(C)', '(D)']
     
-    def __init__(self, llm: str | LLM = "mistralai/Mistral-7B-Instruct-v0.2", split: str = 'train') -> None:
-        super().__init__('quality', llm, split)
+    def __init__(self, split: str = 'train') -> None:
+        super().__init__('quality', split)
         self.answer_format = '''If (A) is correct, answer with \"Answer: (A) ...\"\nIf (B) is correct, answer with \"Answer: (B) ...\"\nIf (C) is correct, answer with \"Answer: (C) ...\"\nIf (D) is correct, answer with \"Answer: (D) ...\"'''
         self.question_type = 'multiple choice question'
         
@@ -244,8 +236,8 @@ class QualityDataset(Dataset):
 
 class NarrativeQADataset(Dataset):
     
-    def __init__(self, llm: str | LLM = "mistralai/Mistral-7B-Instruct-v0.2", split: str = 'train') -> None:
-        super().__init__('narrativeqa', llm, split)
+    def __init__(self, split: str = 'train') -> None:
+        super().__init__('narrativeqa', split)
         self.answer_format = '''Generate your answer and explanation using the following format:\n"Answer: your answer to the question ...\nExplanation: your explanation or reasoning ...". Your answer should be brief and specific.'''
         self.question_type = 'question'
         
@@ -288,8 +280,8 @@ class NarrativeQADataset(Dataset):
 
 class MuSiQueDataset(Dataset):
     
-    def __init__(self, llm: str | LLM = "mistralai/Mistral-7B-Instruct-v0.2", split: str = 'train') -> None:
-        super().__init__('musique', llm, split)
+    def __init__(self, split: str = 'train') -> None:
+        super().__init__('musique', split)
         self.answer_format = '''Generate your answer and explanation using the following format:\n"Answer: your answer to the question ...\nExplanation: your explanation or reasoning ...". Your answer should be brief and specific.'''
         self.question_type = 'question'
         
@@ -331,8 +323,8 @@ class MuSiQueDataset(Dataset):
     
         
 class LooGlEDataset(Dataset):
-    def __init__(self, llm_name: str = "mistralai/Mistral-7B-Instruct-v0.2", split: str = 'test') -> None:
-        super().__init__('loogle', llm_name, split)
+    def __init__(self, split: str = 'test') -> None:
+        super().__init__('loogle', split)
         self.answer_format = '''Generate your answer and explanation using the following format:\n"Answer: your answer to the question ...\nExplanation: your explanation or reasoning ...". Your answer should be brief and specific.'''
         self.question_type = 'question'
         

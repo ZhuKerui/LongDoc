@@ -1,61 +1,5 @@
 from .data import *
 from .prompt import LongDocPrompt
-from langchain_core.messages import HumanMessage
-from langchain_core.documents import Document
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser, StrOutputParser
-from langchain.output_parsers import OutputFixingParser
-from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
-from langchain_huggingface.embeddings import HuggingFaceEmbeddings
-from langchain_huggingface import ChatHuggingFace
-from langchain_text_splitters import SpacyTextSplitter
-from langchain_openai import ChatOpenAI
-from langgraph.graph import END, StateGraph
-
-from langchain_core.pydantic_v1 import BaseModel, Field
-from langchain_community.vectorstores import Chroma
-from langchain_core.embeddings import Embeddings
-from langchain import hub
-
-os.environ["OPENAI_API_KEY"] = "EMPTY"
-
-class MyIndex(BaseModel):
-    i: int
-    
-class MyNode(BaseModel):
-    text:str = ''
-    index:MyIndex
-    
-    def to_doc(self):
-        return Document(page_content=self.text, metadata={'i' : self.index.i})
-    
-class MyStructure:
-    node_class = MyNode
-    name:str
-    
-    def __init__(self, doc_file:str=None) -> None:
-        self.docs:List[MyNode] = []
-        if doc_file is not None:
-            self.load(doc_file)
-            
-    def dump(self, doc_file:str):
-        dumped_docs = [node.dict() for node in self.docs]
-        write_json(doc_file, dumped_docs)
-        
-    def load(self, doc_file:str):
-        dumped_tree = read_json(doc_file)
-        self.docs = [self.node_class.validate(node_info) for node_info in dumped_tree]
-        
-    def create_vector_retriever(self, embedding:Embeddings):
-        self.vectorstore = Chroma.from_documents(
-            documents=[doc.to_doc() for doc in self.docs],
-            collection_name=f"{self.name}-chroma",
-            embedding=embedding,
-        )
-        self.retriever = self.vectorstore.as_retriever()
-    
-
-
 
 class TreeIndex(MyIndex):
     is_leaf: bool
@@ -492,43 +436,6 @@ class TreeQuery:
     def get_query(self, questions:List[str], contexts:List[str], summaries:List[str], chunks:List[int]):
         return self.chain_query.batch([{'question': question, 'document': context, 'chunk': chunk, 'summary': summary} for context, question, chunk, summary in zip(contexts, questions, chunks, summaries)])
         
-class Factory:
-    def __init__(self, embeder_name:str=None, llm_name:str = 'mistralai/Mistral-7B-Instruct-v0.2', chunk_size:int=300, device:str='cpu') -> None:
-        if embeder_name is not None:
-            self.embeder = HuggingFaceEmbeddings(model_name=embeder_name, model_kwargs={'device': device})
-        else:
-            self.embeder = HuggingFaceEmbeddings(model_kwargs={'device': device})
-        self.embeder_name = self.embeder.model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(self.embeder_name)
-        self.splitter = SpacyTextSplitter(pipeline='en_core_web_lg', chunk_size=chunk_size, chunk_overlap=0, length_function=lambda x: len(self.tokenizer.encode(x, add_special_tokens=False)))
-        
-        
-        self.llm_name = llm_name
-        self.llm = ChatOpenAI(model=llm_name, base_url='http://128.174.136.28:8000/v1', temperature=0)
-        
-    def split_text(self, text:str):
-        return [' '.join(t.split()) for t in self.splitter.split_text(text)]
-    
-    def build_corpus(self, text:str, dpr_file:str='temp_dpr.json', tree_file:str='temp_tree.json'):
-        if not os.path.exists(dpr_file) or not os.path.exists(tree_file):
-            pages = self.split_text(text)
-        if os.path.exists(dpr_file):
-            dpr_corpus = MyDPR(dpr_file)
-        else:
-            dpr_corpus = MyDPR.build_dpr(pages)
-            dpr_corpus.dump(dpr_file)
-        dpr_corpus.create_vector_retriever(self.embeder)
-            
-        if os.path.exists(tree_file):
-            tree_corpus = MyTree(tree_file)
-        else:
-            tree_corpus, _ = MyTree.build_summary_pyramid(self.llm, pages, 3)
-            tree_corpus.dump(tree_file)
-        tree_corpus.create_vector_retriever(self.embeder)
-        
-        return dpr_corpus, tree_corpus, [doc.to_doc() for doc in dpr_corpus.docs]
-    
-
 class NavigateState(BaseModel):
     """
     Represents the state of our graph.
