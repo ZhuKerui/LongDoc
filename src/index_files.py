@@ -105,10 +105,10 @@ class LongDoc:
                 
         doc = self.nlp(text)
         ncs = [trim_det_adv(nc) for nc in doc.noun_chunks if nc.root.pos_ not in ['NUM', 'PRON']]
-        ents = [trim_det_adv(ent) for ent in doc.ents if ent.root.pos_ not in ['NUM', 'PRON']]   
+        ents = [trim_det_adv(ent) for ent in doc.ents if ent.root.pos_ not in ['NUM', 'PRON']]
         keywords = [(t.i, t.i+1) for t in doc if t.pos_ in ['VERB', 'ADJ', 'ADV']]
-        ncs_spans = [(nc.start, nc.end) for nc in ncs]
-        ents_spans = [(ent.start, ent.end) for ent in ents]
+        ncs_spans = [(nc.start, nc.end) for nc in ncs if nc]
+        ents_spans = [(ent.start, ent.end) for ent in ents if ent]
         nc_id, eid = 0, 0
         spans = []
         while nc_id < len(ncs_spans) and eid < len(ents_spans):
