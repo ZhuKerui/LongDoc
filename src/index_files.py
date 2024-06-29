@@ -39,7 +39,7 @@ class ChunkInfo(BaseModel):
     chunk_text: str
     statements: List[str] = []
     entities: List[List[str]] = []
-    keywords: List[List[str]] = []
+    ent_modifiers: list = []
         
 
 class LongDoc:
@@ -49,8 +49,7 @@ class LongDoc:
         self.nlp = spacy.load('en_core_web_lg')
         if chunk_info_file:
             self.chunk_infos = [ChunkInfo.parse_obj(line) for line in read_json(chunk_info_file)]
-            self.build_relation_graph()
-            self.build_lexical_store()
+            self.enrich_index()
         
     def build_index(self, article:str, chunk_info_file:str=None):
         pieces = self.factory.split_text(article)
@@ -58,8 +57,8 @@ class LongDoc:
         chunks, statements = self.generate_statements(pieces)
         # statements = [ci.statements for ci in chunk_infos]
         print('end')
-        chunk_infos = [ChunkInfo(i=i, chunk_text=chunk) for i, chunk in enumerate(chunks)]
-        missing_chunk_ids = [ci.i for ci in chunk_infos if not ci.statements]
+        self.chunk_infos = [ChunkInfo(i=i, chunk_text=chunk) for i, chunk in enumerate(chunks)]
+        missing_chunk_ids = [ci.i for ci in self.chunk_infos if not ci.statements]
         attempt = 0
         while missing_chunk_ids:
             print(attempt, len(missing_chunk_ids))
@@ -68,7 +67,7 @@ class LongDoc:
                 entities = self.extract_entities(statements)
                 for cid, (statement_list, entity_list) in enumerate(zip(statements, entities)):
                     if len(statement_list) == len(entity_list):
-                        chunk_infos[cid].statements, chunk_infos[cid].entities = statement_list, entity_list
+                        self.chunk_infos[cid].statements, self.chunk_infos[cid].entities = statement_list, entity_list
             else:
                 temp_stm_groups = []
                 for missing_ci in missing_chunk_ids:
@@ -79,34 +78,47 @@ class LongDoc:
                 entities = self.extract_entities(temp_stm_groups)
                 for sid in range(len(temp_stm_groups)//2):
                     if len(temp_stm_groups[sid * 2]) == len(entities[sid * 2]) and len(temp_stm_groups[sid * 2 + 1]) == len(entities[sid * 2 + 1]):
-                        chunk_infos[missing_chunk_ids[sid]].statements, chunk_infos[missing_chunk_ids[sid]].entities = temp_stm_groups[sid * 2] + temp_stm_groups[sid * 2 + 1], entities[sid * 2] + entities[sid * 2 + 1]
-            missing_chunk_ids = [ci.i for ci in chunk_infos if not ci.statements]
+                        self.chunk_infos[missing_chunk_ids[sid]].statements, self.chunk_infos[missing_chunk_ids[sid]].entities = temp_stm_groups[sid * 2] + temp_stm_groups[sid * 2 + 1], entities[sid * 2] + entities[sid * 2 + 1]
+            missing_chunk_ids = [ci.i for ci in self.chunk_infos if not ci.statements]
 
-        for ci in chunk_infos:
+        if chunk_info_file:
+            write_json(chunk_info_file, [ci.dict() for ci in self.chunk_infos])
+            
+    def enrich_index(self):
+        for ci in self.chunk_infos:
             for sid, statement in enumerate(ci.statements):
-                addition_ents, keywords = self.collect_keywords_from_text(statement)
-                ci.keywords.append(keywords)
+                addition_ents, ent_modifiers = self.collect_keywords_from_text(statement)
+                ent_map = {}
                 for addition_ent in addition_ents:
-                    if all([addition_ent.lower() not in ent.lower() for ent in ci.entities[sid]]):
+                    for ent in ci.entities[sid]:
+                        if addition_ent.lower() in ent.lower():
+                            ent_map[addition_ent] = ent
+                    if addition_ent not in ent_map:
+                        ent_map[addition_ent] = addition_ent
                         ci.entities[sid].append(addition_ent)
-        
-        self.chunk_infos = chunk_infos
+                updated_ent_modifiers = []
+                for ent, modifiers in ent_modifiers:
+                    if isinstance(ent, str):
+                        updated_ent_modifiers.append(json.dumps((ent_map[ent], modifiers)))
+                    else:
+                        ent, modifiers = modifiers, ent
+                        updated_ent_modifiers.append(json.dumps((modifiers, ent_map[ent])))
+                ci.ent_modifiers.append([json.loads(s) for s in set(updated_ent_modifiers)])
+
         self.build_relation_graph()
         self.build_lexical_store()
-        if chunk_info_file:
-            write_json(chunk_info_file, [ci.dict() for ci in chunk_infos])
-
+        
     def collect_keywords_from_text(self, text:str):
         
-        def trim_det_adv(noun_chunk:spacy.tokens.Span):
+        def trim_det(noun_chunk:spacy.tokens.Span):
             for tid, t in enumerate(noun_chunk):
-                if t.pos_ not in ['DET', 'ADV']:
+                if t.pos_ not in ['DET']:
                     return noun_chunk[tid:]
                 
         doc = self.nlp(text)
-        ncs = [trim_det_adv(nc) for nc in doc.noun_chunks if nc.root.pos_ not in ['NUM', 'PRON']]
-        ents = [trim_det_adv(ent) for ent in doc.ents if ent.root.pos_ not in ['NUM', 'PRON']]
-        keywords = [(t.i, t.i+1) for t in doc if t.pos_ in ['VERB', 'ADJ', 'ADV']]
+        ncs = [trim_det(nc) for nc in doc.noun_chunks if nc.root.pos_ not in ['NUM', 'PRON']]
+        ents = [trim_det(ent) for ent in doc.ents if ent.root.pos_ not in ['NUM', 'PRON']]
+        
         ncs_spans = [(nc.start, nc.end) for nc in ncs if nc]
         ents_spans = [(ent.start, ent.end) for ent in ents if ent]
         nc_id, eid = 0, 0
@@ -143,15 +155,62 @@ class LongDoc:
                 updated_spans.append(span)
         updated_spans = [span for span in updated_spans if any([t.pos_ in ['NOUN', 'PROPN'] for t in doc[span[0]:span[1]]])]
         updated_spans = [span if doc[span[0]].pos_ != 'PRON' else (span[0]+1, span[1]) for span in updated_spans]
-        ent_candidates = [doc[span[0]:span[1]].text for span in updated_spans]
-        ent_candidates = [ent.strip('"') for ent in ent_candidates]
-        ent_candidates = [ent for ent in ent_candidates if len(ent) >= 2]
+        ent_candidates:List[str] = []
+        ent_mask = -np.ones(len(doc), dtype=np.int32)
+        for span in updated_spans:
+            ent = doc[span[0]:span[1]].text.strip('"\'')
+            if len(ent) >= 2:
+                ent_mask[span[0]:span[1]] = len(ent_candidates)
+                ent_candidates.append(ent)
         
-        keywords = updated_spans + keywords
-        keywords.sort(key=lambda x: x[0])
-        kw_candidates = [doc[span[0]:span[1]].text for span in keywords]
-        kw_candidates = [ent.strip('"') for ent in kw_candidates]
-        return ent_candidates, kw_candidates
+        ent_modifiers:List[Tuple[str, List[str]] | Tuple[List[str], str]] = []
+        for t in doc:
+            if t.pos_ in ['VERB', 'ADJ', 'AUX'] and ent_mask[t.i] < 0 and not t.is_stop:
+                modifiers = []
+                if t.pos_ in ['VERB', 'AUX']:
+                    modifiers.append(f'{t.lemma_}_{t.i}')
+                    subj_found = False
+                    for child in t.children:
+                        if 'subj' in child.dep_ and ent_mask[child.i] >= 0:
+                            ent_modifiers.append((ent_candidates[ent_mask[child.i]], modifiers))
+                            subj_found = True
+                        elif 'obj' in child.dep_ and ent_mask[child.i] >= 0:
+                            ent_modifiers.append((modifiers, ent_candidates[ent_mask[child.i]]))
+                        elif 'advmod' == child.dep_ and ent_mask[child.i] < 0 and not child.is_stop:
+                            if child.i < t.i:
+                                modifiers.insert(0, f'{child.text}_{child.i}')
+                            else:
+                                modifiers.append(f'{child.text}_{child.i}')
+                        elif 'prep' == child.dep_:
+                            for grand_child in child.children:
+                                if 'obj' in grand_child.dep_ and ent_mask[grand_child.i] >= 0:
+                                    ent_modifiers.append((modifiers + [child.text], ent_candidates[ent_mask[grand_child.i]]))
+                                elif 'prep' == grand_child.dep_:
+                                    for grand_grand_child in grand_child.children:
+                                        if 'obj' in grand_grand_child.dep_ and ent_mask[grand_grand_child.i] >= 0:
+                                            ent_modifiers.append((modifiers + [child.text, grand_child.text], ent_candidates[ent_mask[grand_grand_child.i]]))
+                    if not subj_found:
+                        for ancestor in t.ancestors:
+                            for child in ancestor.children:
+                                if 'subj' in child.dep_ and ent_mask[child.i] >= 0:
+                                    ent_modifiers.append((ent_candidates[ent_mask[child.i]], modifiers))
+                                    for grand_child in child.children:
+                                        if grand_child.dep_ in ['conj', 'appos'] and ent_mask[grand_child.i] >= 0:
+                                            ent_modifiers.append((ent_candidates[ent_mask[grand_child.i]], modifiers))
+                                    subj_found = True
+                            if subj_found:
+                                break
+                elif t.pos_ == 'ADJ':
+                    modifiers.append(f'{t.text}_{t.i}')
+                    for ancestor in t.ancestors:
+                        if ent_mask[ancestor.i] >= 0:
+                            if ancestor.i < t.i:
+                                ent_modifiers.append((ent_candidates[ent_mask[ancestor.i]], [t.text]))
+                            else:
+                                ent_modifiers.append(([t.text], ent_candidates[ent_mask[ancestor.i]]))
+                            break
+        
+        return ent_candidates, ent_modifiers
     
     def parse_statements(self, text:str):
         i = 1
