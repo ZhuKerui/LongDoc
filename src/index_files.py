@@ -12,23 +12,23 @@ summary_prompt = '''Summarize the following passage.
 Passage:
 {chunk}'''
 
-statement_prompt = '''A summary of a story and a passage from the story is provided below.
+statement_prompt = '''The summary of a story is provided below.
 
 
 Summary:
 {summary}
 
 
-Passage:
-{chunk}
-
-
-Review the provided story summary and passage, and break the passage into a list of atomic fact statements.
+Below is a passage from the story. Break the passage into a list of atomic fact statements.
 Requirements:
 1. Order the statements as they appear in the passage.
 2. Use the original words from the passage.
 3. Avoid pronouns for clarity.
-4. Use the summary for context.'''
+4. Use the summary above for context.
+
+
+Passage:
+{chunk}'''
 
 
 import spacy
@@ -55,7 +55,7 @@ class LongDoc:
     # Index functions
     def build_index(self, article:str, chunk_info_file:str=None):
         pieces = self.factory.split_text(article)
-        chunks, statements = self.generate_statements(pieces)
+        chunks, statements = self.generate_statements(pieces, chunk_size=5)
         self.chunk_infos = [ChunkInfo(i=i, chunk_text=chunk, statements=statements[i]) for i, chunk in enumerate(chunks)]
         # missing_chunk_ids = [ci.i for ci in self.chunk_infos if not ci.statements]
         # temp_stm_groups = []
@@ -91,9 +91,9 @@ class LongDoc:
                     # for ent in ci.entities[sid]:
                     #     if addition_ent.lower() in ent.lower():
                     #         ent_map[addition_ent] = ent
-                    if addition_ent not in ent_map:
-                        ent_map[addition_ent] = addition_ent
-                        ci.entities[-1].append(addition_ent)
+                    # if addition_ent not in ent_map:
+                    ent_map[addition_ent] = addition_ent
+                    ci.entities[-1].append(addition_ent)
                 updated_ent_modifiers = []
                 for ent, modifiers in ent_modifiers:
                     if isinstance(ent, str):
@@ -104,10 +104,11 @@ class LongDoc:
                 ci.ent_modifiers.append([json.loads(s) for s in set(updated_ent_modifiers)])
 
         self.build_ent_graph()
+        self.build_semantic_graph()
         self.build_lexical_store()
         
     def build_ent_graph(self):
-        self.ent_graph = nx.Graph()
+        self.ent_graph = nx.DiGraph()
         # semantic edges
         for ci in self.chunk_infos:
             for sid, related_ents in enumerate(ci.entities):
@@ -120,6 +121,7 @@ class LongDoc:
                     if loc not in ent_locs:
                         ent_locs.insert(0, loc)
                 for ent1, ent2 in itertools.combinations(related_ents, 2):
+                    ent1, ent2 = (ent1, ent2) if len(ent2) < len(ent1) else (ent2, ent1)
                     if not self.ent_graph.has_edge(ent1, ent2):
                         self.ent_graph.add_edge(ent1, ent2, locs=[])
                     edge_locs:list = self.ent_graph[ent1][ent2]['locs']
@@ -136,6 +138,7 @@ class LongDoc:
         for normal in self.normal2ents:
             # Add edges between entities that have the same norm
             for ent1, ent2 in itertools.combinations(self.normal2ents[normal], 2):
+                ent1, ent2 = (ent1, ent2) if len(ent2) < len(ent1) else (ent2, ent1)
                 if not self.ent_graph.has_edge(ent1, ent2):
                     self.ent_graph.add_edge(ent1, ent2, locs=[])
                 edge_locs:list = self.ent_graph[ent1][ent2]['locs']
@@ -147,11 +150,27 @@ class LongDoc:
                     similar_normal = ' '.join(similar_normal)
                     if normal != similar_normal:
                         for ent1, ent2 in itertools.product(self.normal2ents[normal], self.normal2ents[similar_normal]):
+                            ent1, ent2 = (ent1, ent2) if len(ent2) < len(ent1) else (ent2, ent1)
                             if not self.ent_graph.has_edge(ent1, ent2):
                                 self.ent_graph.add_edge(ent1, ent2, locs=[])
                             edge_locs:list = self.ent_graph[ent1][ent2]['locs']
                             edge_locs.extend(itertools.product(self.ent_graph.nodes[ent1]['locs'], self.ent_graph.nodes[ent2]['locs']))
-        
+                            
+    def build_semantic_graph(self):
+        self.semantic_graph = nx.Graph()
+        for ci in self.chunk_infos:
+            for sid, entities in enumerate(ci.entities):
+                loc = (ci.i, sid)
+                for ent1, ent2 in itertools.combinations(entities, 2):
+                    ent1, ent2 = f'{ent1}_{ci.i}', f'{ent2}_{ci.i}'
+                    if not self.semantic_graph.has_edge(ent1, ent2):
+                        self.semantic_graph.add_edge(ent1, ent2, locs=[])
+                    edge_locs:List[Tuple[Tuple[int, int], Tuple[int, int]]] = self.semantic_graph[ent1][ent2]['locs']
+                    edge_locs.append((loc, loc))
+        for ent1, ent2, edge_locs in self.ent_graph.edges.data('locs'):
+            for ent1_loc, ent2_loc in edge_locs:
+                if ent1_loc[0] != ent2_loc[0]: # Entities from different chunks, must be similar entities
+                    self.semantic_graph.add_edge(f'{ent1}_{ent1_loc[0]}', f'{ent2}_{ent2_loc[0]}')
 
     def build_lexical_store(self):
         self.raw_corpus = [self.normalize_text(ci.chunk_text) for ci in self.chunk_infos]
@@ -169,10 +188,9 @@ class LongDoc:
         temp_ents = []
         for normal in candidate_normals:
             temp_ents.extend(self.normal2ents[normal])
-        temp_ent_corpus = [self.split_lower_text(ent) for ent in temp_ents]
-        temp_bm25 = BM25Okapi(temp_ent_corpus)
-        ent_idxs = self.bm25_retrieve(tokenized_query, temp_bm25)
-        return [temp_ents[idx] for idx in ent_idxs][:n]
+        temp_ent_refs = [' '.join(self.split_lower_text(ent)) for ent in temp_ents]
+        rouge_l = self.factory.rouge.compute(predictions=[' '.join(tokenized_query)] * len(temp_ent_refs), references=temp_ent_refs, use_aggregator=False)['rougeL']
+        return [temp_ents[idx] for idx in np.argsort(rouge_l)[::-1]][:n]
 
     def exact_match_chunks(self, query:str):
         normalized_query = ' '.join(self.normalize_text(query))
@@ -284,7 +302,7 @@ class LongDoc:
         ent_mask = -np.ones(len(doc), dtype=np.int32)
         for span in updated_spans:
             ent = doc[span[0]:span[1]].text.strip('"\'')
-            if len(ent) >= 2:
+            if len(ent) >= 2 and ent not in ent_candidates:
                 ent_mask[span[0]:span[1]] = len(ent_candidates)
                 ent_candidates.append(ent)
         

@@ -31,6 +31,7 @@ from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_community.vectorstores import Chroma
 from langchain_core.embeddings import Embeddings
 from langchain import hub
+import evaluate
 
 # from rank_bm25 import BM25Okapi
 from nltk import word_tokenize, sent_tokenize
