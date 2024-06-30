@@ -20,8 +20,8 @@ end = 40
 factory = Factory(device='cuda:2', chunk_size=100)
 longdoc = LongDoc(factory=factory)
 
-for eid in range(start, end):
-    print(eid - start+ 1, '/', end - start)
+for eid in tqdm(range(start, end)):
+    # print(eid - start+ 1, '/', end - start)
     index_file = os.path.join(dataset.data_dir, f'index_{eid}.json')
     article = dataset.get_article(dataset.data[eid])
     longdoc.build_index(article, chunk_info_file=index_file)
