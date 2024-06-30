@@ -56,43 +56,44 @@ class LongDoc:
     def build_index(self, article:str, chunk_info_file:str=None):
         pieces = self.factory.split_text(article)
         chunks, statements = self.generate_statements(pieces)
-        self.chunk_infos = [ChunkInfo(i=i, chunk_text=chunk) for i, chunk in enumerate(chunks)]
-        missing_chunk_ids = [ci.i for ci in self.chunk_infos if not ci.statements]
-        temp_stm_groups = []
-        split_nums:List[int] = []
-        for missing_ci in missing_chunk_ids:
-            temp_stms = statements[missing_ci]
-            split_num = (len(temp_stms) + 1) // 5
-            split_nums.append(split_num)
-            for split in range(split_num):
-                temp_stm_groups.append(temp_stms[split * 5 : (split + 1) * 5])
-        entities = self.extract_entities(temp_stm_groups)
-        start_stm_idx = 0
-        for cid, split_num in enumerate(split_nums):
-            for sid in range(split_num):
-                self.chunk_infos[missing_chunk_ids[cid]].statements.extend(temp_stm_groups[start_stm_idx + sid])
-                if len(temp_stm_groups[start_stm_idx + sid]) == len(entities[start_stm_idx + sid]):
-                    self.chunk_infos[missing_chunk_ids[cid]].entities.extend(entities[start_stm_idx + sid])
-                else:
-                    self.chunk_infos[missing_chunk_ids[cid]].entities.extend([[] for _ in range(len(temp_stm_groups[start_stm_idx + sid]))])
-            start_stm_idx += split_num
-        missing_chunk_ids = [ci.i for ci in self.chunk_infos if not ci.statements]
+        self.chunk_infos = [ChunkInfo(i=i, chunk_text=chunk, statements=statements[i]) for i, chunk in enumerate(chunks)]
+        # missing_chunk_ids = [ci.i for ci in self.chunk_infos if not ci.statements]
+        # temp_stm_groups = []
+        # split_nums:List[int] = []
+        # for missing_ci in missing_chunk_ids:
+        #     temp_stms = statements[missing_ci]
+        #     split_num = (len(temp_stms) + 1) // 5
+        #     split_nums.append(split_num)
+        #     for split in range(split_num):
+        #         temp_stm_groups.append(temp_stms[split * 5 : (split + 1) * 5])
+        # entities = self.extract_entities(temp_stm_groups)
+        # start_stm_idx = 0
+        # for cid, split_num in enumerate(split_nums):
+        #     for sid in range(split_num):
+        #         self.chunk_infos[missing_chunk_ids[cid]].statements.extend(temp_stm_groups[start_stm_idx + sid])
+        #         if len(temp_stm_groups[start_stm_idx + sid]) == len(entities[start_stm_idx + sid]):
+        #             self.chunk_infos[missing_chunk_ids[cid]].entities.extend(entities[start_stm_idx + sid])
+        #         else:
+        #             self.chunk_infos[missing_chunk_ids[cid]].entities.extend([[] for _ in range(len(temp_stm_groups[start_stm_idx + sid]))])
+        #     start_stm_idx += split_num
+        # missing_chunk_ids = [ci.i for ci in self.chunk_infos if not ci.statements]
 
         if chunk_info_file:
             write_json(chunk_info_file, [ci.dict() for ci in self.chunk_infos])
     
     def enrich_index(self):
         for ci in self.chunk_infos:
-            for sid, statement in enumerate(ci.statements):
+            for statement in ci.statements:
                 addition_ents, ent_modifiers = self.collect_keywords_from_text(statement)
                 ent_map = {}
+                ci.entities.append([])
                 for addition_ent in addition_ents:
-                    for ent in ci.entities[sid]:
-                        if addition_ent.lower() in ent.lower():
-                            ent_map[addition_ent] = ent
+                    # for ent in ci.entities[sid]:
+                    #     if addition_ent.lower() in ent.lower():
+                    #         ent_map[addition_ent] = ent
                     if addition_ent not in ent_map:
                         ent_map[addition_ent] = addition_ent
-                        ci.entities[sid].append(addition_ent)
+                        ci.entities[-1].append(addition_ent)
                 updated_ent_modifiers = []
                 for ent, modifiers in ent_modifiers:
                     if isinstance(ent, str):
@@ -102,30 +103,30 @@ class LongDoc:
                         updated_ent_modifiers.append(json.dumps((modifiers, ent_map[ent])))
                 ci.ent_modifiers.append([json.loads(s) for s in set(updated_ent_modifiers)])
 
-        self.build_relation_graph()
+        self.build_ent_graph()
         self.build_lexical_store()
         
-    def build_relation_graph(self):
-        relation_graph = nx.Graph()
+    def build_ent_graph(self):
+        self.ent_graph = nx.Graph()
         # semantic edges
         for ci in self.chunk_infos:
             for sid, related_ents in enumerate(ci.entities):
                 loc = (ci.i, sid)
                 # Insert node locs
                 for e in related_ents:
-                    if not relation_graph.has_node(e):
-                        relation_graph.add_node(e, locs=[], norm=' '.join(self.normalize_entity(e)))
-                    ent_locs:list = relation_graph.nodes[e]['locs']
+                    if not self.ent_graph.has_node(e):
+                        self.ent_graph.add_node(e, locs=[], norm=' '.join(self.normalize_entity(e)))
+                    ent_locs:list = self.ent_graph.nodes[e]['locs']
                     if loc not in ent_locs:
                         ent_locs.insert(0, loc)
                 for ent1, ent2 in itertools.combinations(related_ents, 2):
-                    if not relation_graph.has_edge(ent1, ent2):
-                        relation_graph.add_edge(ent1, ent2, locs=[])
-                    edge_locs:list = relation_graph[ent1][ent2]['locs']
+                    if not self.ent_graph.has_edge(ent1, ent2):
+                        self.ent_graph.add_edge(ent1, ent2, locs=[])
+                    edge_locs:list = self.ent_graph[ent1][ent2]['locs']
                     edge_locs.append((loc, loc))
         
         self.normal2ents:Dict[str, List[str]] = defaultdict(list)
-        for ent, normal in relation_graph.nodes(data='norm'):
+        for ent, normal in self.ent_graph.nodes(data='norm'):
             self.normal2ents[normal].append(ent)
         normals = list(self.normal2ents)
         normals.sort()
@@ -135,10 +136,10 @@ class LongDoc:
         for normal in self.normal2ents:
             # Add edges between entities that have the same norm
             for ent1, ent2 in itertools.combinations(self.normal2ents[normal], 2):
-                if not relation_graph.has_edge(ent1, ent2):
-                    relation_graph.add_edge(ent1, ent2, locs=[])
-                edge_locs:list = relation_graph[ent1][ent2]['locs']
-                edge_locs.extend(itertools.product(relation_graph.nodes[ent1]['locs'], relation_graph.nodes[ent2]['locs']))
+                if not self.ent_graph.has_edge(ent1, ent2):
+                    self.ent_graph.add_edge(ent1, ent2, locs=[])
+                edge_locs:list = self.ent_graph[ent1][ent2]['locs']
+                edge_locs.extend(itertools.product(self.ent_graph.nodes[ent1]['locs'], self.ent_graph.nodes[ent2]['locs']))
             # Add edges between entities that have similar norms
             scores:List[float] = self.ent_bm25.get_scores(normal.split()).tolist()
             for score, similar_normal in zip(scores, self.ent_corpus):
@@ -146,12 +147,11 @@ class LongDoc:
                     similar_normal = ' '.join(similar_normal)
                     if normal != similar_normal:
                         for ent1, ent2 in itertools.product(self.normal2ents[normal], self.normal2ents[similar_normal]):
-                            if not relation_graph.has_edge(ent1, ent2):
-                                relation_graph.add_edge(ent1, ent2, locs=[])
-                            edge_locs:list = relation_graph[ent1][ent2]['locs']
-                            edge_locs.extend(itertools.product(relation_graph.nodes[ent1]['locs'], relation_graph.nodes[ent2]['locs']))
+                            if not self.ent_graph.has_edge(ent1, ent2):
+                                self.ent_graph.add_edge(ent1, ent2, locs=[])
+                            edge_locs:list = self.ent_graph[ent1][ent2]['locs']
+                            edge_locs.extend(itertools.product(self.ent_graph.nodes[ent1]['locs'], self.ent_graph.nodes[ent2]['locs']))
         
-        self.graph = relation_graph
 
     def build_lexical_store(self):
         self.raw_corpus = [self.normalize_text(ci.chunk_text) for ci in self.chunk_infos]
