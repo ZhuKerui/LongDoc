@@ -19,12 +19,13 @@ Summary:
 {summary}
 
 
-Below is a passage from the story. Break the passage into a list of atomic fact statements.
-Requirements:
+Now you are given a passage from the story. Break the passage into a comprehensive list of atomic fact statements.
+
+Mandatory requirements:
 1. Order the statements as they appear in the passage.
-2. Use the original words from the passage.
-3. Avoid pronouns for clarity.
-4. Use the summary above for context.
+2. Use the exact words from the passage.
+3. Refer to the summary above for context and resolving pronouns.
+4. Ensure the list contains ALL information from the passage.
 
 
 Passage:
