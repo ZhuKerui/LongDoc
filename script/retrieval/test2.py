@@ -62,7 +62,7 @@ for task in ["narrativeqa", "qasper",
             #  "multifieldqa_en", "hotpotqa", "2wikimqa", "musique", 
              "gov_report", "qmsum"]:
     dataset = []
-    for sample in load_dataset('THUDM/LongBench', task, split='test'):
+    for sample in tqdm(load_dataset('THUDM/LongBench', task, split='test')):
         prompt = templates[task].format(context=sample['context']) if task == 'gov_report' else templates[task].format(context=sample['context'], input=sample['input'])
         if len(tokenizer.encode(prompt)) < 32000 - 500:
             chunks = f.split_text(sample['context'])
