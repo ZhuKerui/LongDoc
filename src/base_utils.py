@@ -82,7 +82,8 @@ class Factory:
             self.llm = ChatOpenAI(model=llm_name, base_url='http://128.174.136.28:8000/v1', temperature=0)
         
     def split_text(self, text:str):
-        return [' '.join(t.split()) for t in self.splitter.split_text(text)]
+        # return [' '.join(t.split()) for t in self.splitter.split_text(text)]
+        return self.splitter.split_text(text)
     
     # def build_corpus(self, text:str, dpr_file:str='temp_dpr.json', tree_file:str='temp_tree.json'):
     #     if not os.path.exists(dpr_file) or not os.path.exists(tree_file):
