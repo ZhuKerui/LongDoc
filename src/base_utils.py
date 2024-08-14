@@ -79,7 +79,7 @@ class Factory:
         
         self.llm_name = llm_name
         if self.llm_name:
-            self.llm = ChatOpenAI(model=llm_name, base_url='http://128.174.136.28:8000/v1', temperature=0)
+            self.llm = ChatOpenAI(model=llm_name, base_url='http://128.174.136.28:8001/v1', temperature=0)
         
     def split_text(self, text:str):
         # return [' '.join(t.split()) for t in self.splitter.split_text(text)]
