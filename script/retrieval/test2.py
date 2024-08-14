@@ -5,7 +5,7 @@ from src.index_files import *
 from src.corenlp_base import Doc, Mention, Sentence
 
 # dataset = QualityDataset(split='dev')
-f = Factory(chunk_size=300)#, llm_name=None)
+f = Factory(chunk_size=300, port=8001)#, llm_name=None)
 tokenizer = AutoTokenizer.from_pretrained(f.llm_name)
 # article = dataset.get_article(dataset.data[2])
 
@@ -66,8 +66,9 @@ for task in ["narrativeqa", "qasper",
         prompt = templates[task].format(context=sample['context']) if task == 'gov_report' else templates[task].format(context=sample['context'], input=sample['input'])
         if len(tokenizer.encode(prompt)) < 32000 - 500:
             chunks = f.split_text(sample['context'])
+            print(task)
             prompts = [relevant_templates[task].format(context=sample['context'], chunk=chunk) if task == 'gov_report' else relevant_templates[task].format(context=sample['context'], input=sample['input'], chunk=chunk) for chunk in chunks]
             sample['chunk_relevant'] = [(chunk, gen[0].text) for chunk, gen in zip(chunks, f.llm.generate([[HumanMessage(content=prompt)] for prompt in prompts], max_tokens=5).generations)]
             answers[task].append(sample)
             
-write_json('relevant.json', answers)
+    write_json('relevant.json', answers)

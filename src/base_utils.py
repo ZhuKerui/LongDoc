@@ -66,7 +66,7 @@ class MyStructure:
         self.retriever = self.vectorstore.as_retriever()
         
 class Factory:
-    def __init__(self, embeder_name:str=None, llm_name:str = DEFAULT_LLM, chunk_size:int=300, device:str='cpu') -> None:
+    def __init__(self, embeder_name:str=None, llm_name:str = DEFAULT_LLM, chunk_size:int=300, device:str='cpu', port:int=8000) -> None:
         if embeder_name is not None:
             self.embeder = HuggingFaceEmbeddings(model_name=embeder_name, model_kwargs={'device': device})
         else:
@@ -79,7 +79,7 @@ class Factory:
         
         self.llm_name = llm_name
         if self.llm_name:
-            self.llm = ChatOpenAI(model=llm_name, base_url='http://128.174.136.28:8001/v1', temperature=0)
+            self.llm = ChatOpenAI(model=llm_name, base_url=f'http://128.174.136.28:{port}/v1', temperature=0)
         
     def split_text(self, text:str):
         # return [' '.join(t.split()) for t in self.splitter.split_text(text)]

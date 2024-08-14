@@ -5,7 +5,7 @@ from src.index_files import *
 from src.corenlp_base import Doc, Mention, Sentence
 
 # dataset = QualityDataset(split='dev')
-f = Factory(chunk_size=300)#, llm_name=None)
+f = Factory(chunk_size=300, port=8000)#, llm_name=None)
 tokenizer = AutoTokenizer.from_pretrained(f.llm_name)
 # article = dataset.get_article(dataset.data[2])
 
