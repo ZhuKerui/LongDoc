@@ -41,7 +41,7 @@ for task in ["narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "2wikimqa",
         if len(tokenizer.encode(prompt)) < 32000 - 500:
             sample['prompt'] = prompt
             dataset.append(sample)
-    for i in tqdm(range((len(dataset) + 1) // 5)):
+    for i in tqdm(range((len(dataset) - 1) // 5 + 1)):
         batch_samples = dataset[i*5 : (i+1)*5]
         for sample, gen in zip(batch_samples, f.llm.generate([[HumanMessage(content=sample['prompt'])] for sample in batch_samples]).generations):
             sample['gen'] = gen[0].text
