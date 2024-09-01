@@ -75,6 +75,7 @@ class Factory:
         self.tokenizer = AutoTokenizer.from_pretrained(self.embeder_name)
         self.splitter = SpacyTextSplitter(pipeline='en_core_web_lg', chunk_size=chunk_size, chunk_overlap=0, length_function=lambda x: len(self.tokenizer.encode(x, add_special_tokens=False)))
         self.rouge = evaluate.load('rouge')
+        self.nlp = spacy.load('en_core_web_lg')
         
         
         self.llm_name = llm_name

@@ -37,6 +37,7 @@ import evaluate
 from nltk import word_tokenize, sent_tokenize
 from datasets import load_dataset
 from nltk.corpus import wordnet
+import spacy
 
 from transformers import AutoTokenizer
 
