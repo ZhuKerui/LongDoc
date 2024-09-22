@@ -66,14 +66,16 @@ class MyStructure:
         self.retriever = self.vectorstore.as_retriever()
         
 class Factory:
-    def __init__(self, embeder_name:str=None, llm_name:str = DEFAULT_LLM, chunk_size:int=300, device:str='cpu', port:int=8000) -> None:
-        if embeder_name is not None:
-            self.embeder = HuggingFaceEmbeddings(model_name=embeder_name, model_kwargs={'device': device})
-        else:
-            self.embeder = HuggingFaceEmbeddings(model_kwargs={'device': device})
-        self.embeder_name = self.embeder.model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(self.embeder_name)
-        self.splitter = SpacyTextSplitter(pipeline='en_core_web_lg', chunk_size=chunk_size, chunk_overlap=0, length_function=lambda x: len(self.tokenizer.encode(x, add_special_tokens=False)))
+    def __init__(self, embeder:HuggingFaceEmbeddings=None, llm_name:str = DEFAULT_LLM, port:int=8000) -> None:
+        # if embeder_name is not None:
+        #     self.embeder = HuggingFaceEmbeddings(model_name=embeder_name, model_kwargs={'device': device}, encode_kwargs=encode_kwargs)
+        # else:
+        #     self.embeder = HuggingFaceEmbeddings(model_kwargs={'device': device})
+        self.embeder = embeder
+        if self.embeder:
+            self.embeder_name = self.embeder.model_name
+            self.embed_tokenizer = AutoTokenizer.from_pretrained(self.embeder_name)
+        # self.splitter = SpacyTextSplitter(pipeline='en_core_web_lg', chunk_size=chunk_size, chunk_overlap=0, length_function=lambda x: len(self.embed_tokenizer.encode(x, add_special_tokens=False)))
         self.rouge = evaluate.load('rouge')
         self.nlp = spacy.load('en_core_web_lg')
         
@@ -81,10 +83,11 @@ class Factory:
         self.llm_name = llm_name
         if self.llm_name:
             self.llm = ChatOpenAI(model=llm_name, base_url=f'http://128.174.136.28:{port}/v1', temperature=0)
+            self.llm_tokenizer = AutoTokenizer.from_pretrained(self.llm_name)
         
-    def split_text(self, text:str):
-        # return [' '.join(t.split()) for t in self.splitter.split_text(text)]
-        return self.splitter.split_text(text)
+    # def split_text(self, text:str):
+    #     # return [' '.join(t.split()) for t in self.splitter.split_text(text)]
+    #     return self.splitter.split_text(text)
     
     # def build_corpus(self, text:str, dpr_file:str='temp_dpr.json', tree_file:str='temp_tree.json'):
     #     if not os.path.exists(dpr_file) or not os.path.exists(tree_file):

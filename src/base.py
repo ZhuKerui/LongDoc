@@ -22,6 +22,7 @@ from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain.output_parsers import OutputFixingParser
 from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
 from langchain_huggingface.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings.huggingface import HuggingFaceBgeEmbeddings, HuggingFaceInstructEmbeddings
 from langchain_huggingface import ChatHuggingFace
 from langchain_text_splitters import SpacyTextSplitter
 from langchain_openai import ChatOpenAI
