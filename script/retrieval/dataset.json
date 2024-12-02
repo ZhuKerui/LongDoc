@@ -1,0 +1,101 @@
+[
+    {
+        "file": "ReprBERT.pdf",
+        "qa": {
+            "adaption": ["Fine-tuning"],
+            "base_model": ["StructBERT"],
+            "task": ["Search/Matching The dataset contains query-product pairs also sampled from the search logs, and then labeled Good (relevant) or Bad (irrelevant) by experienced human annotators."],
+            "paradigm": ["LLM Embeddings + RS"]
+        }
+    },
+    {
+        "file": "MESE.pdf",
+        "qa": {
+            "adaption": ["Fine-tuning", "Prompt Tuning"],
+            "base_model": ["DistilBERT", "GPT-2"],
+            "task": ["Conversational RS We evaluated our model on two datasets: ReDial dataset (Li et al., 2018) for comparison with previous models and INSPIRED dataset (Hayati et al., 2020) for ablation studies. Both datasets were collected on Amazon Mechanical Turk (AMT) platform where workers made conversations related to movie seeking and recommending following a set of extensive instructions."],
+            "paradigm": ["LLM as RS", "LLM Embeddings + RS"]
+        }
+    },
+    {
+        "file": "ChatGPT.pdf",
+        "qa": {
+            "adaption": ["Prompting", "In-context Learning"],
+            "base_model": ["ChatGPT"],
+            "task": ["rating prediction", "sequential recommendation", "direct recommendation", "explanation generation", "review summarization"],
+            "paradigm": ["LLM as RS"]
+        }
+    },
+    {
+        "file": "LLM-Rate.pdf",
+        "qa": {
+            "adaption": ["Prompting", "In-context Learning", "Fine-tuning"],
+            "base_model": ["ChatGPT", "text-davinci-003", "Flan-U-PaLM", "Flan-T5-Base", "Flan-T5-XXL"],
+            "task": ["Rating Prediction • MovieLens [13]: We use the version MovieLens-1M that includes 1 million user ratings for movies. • Amazon-Books [21]: We use the “Books” category of the Amazon Review Dataset with users' ratings on items. We use the 5-core version that filters out users and items with less than 5 interactions."],
+            "paradigm": ["LLM as RS"]
+        }
+    },
+    {
+        "file": "PEPLER.pdf",
+        "qa": {
+            "adaption": ["Prompt Tuning"],
+            "base_model": ["GPT-2"],
+            "task": ["Explainable Recommendation"],
+            "paradigm": ["LLM as RS"]
+        }
+    },
+    {
+        "file": "Agent4Rec.pdf",
+        "qa": {
+            "adaption": ["Prompting"],
+            "base_model": ["ChatGPT"],
+            "task": ["user taste", "rating distribution", "social traits", "recommendation strategies evaluation", "page-by-page recommendation enhancements", "case study of interview", "Filter Bubble Effect", "Discovering Causal Relationships"],
+            "paradigm": ["LLM Tokens + RS"]
+        }
+    },
+    {
+        "file": "GLRec.pdf",
+        "qa": {
+            "adaption": ["Instruction-tuning"],
+            "base_model": ["BELLE-LLaMA-7B"],
+            "task": ["Pointwise Job Recommendation", "Pairwise Job Recommendation"],
+            "paradigm": ["LLM as RS"]
+        }
+    },
+    {
+        "file": "ONCE.pdf",
+        "qa": {
+            "adaption": ["Fine-tuning", "Prompting"],
+            "base_model": ["LLaMA-7B", "LLaMA-13B", "GPT-3.5"],
+            "task": ["Content recommendation: news recommendation and book recommendation"],
+            "paradigm": ["LLM Embeddings + RS", "LLM Tokens + RS"]
+        }
+    },
+    {
+        "file": "UniCRS.pdf",
+        "qa": {
+            "adaption": ["Prompting"],
+            "base_model": ["DialoGPT", "RoBERTa"],
+            "task": ["Conversational recommender system"],
+            "paradigm": ["LLM Embeddings + RS", "LLM Tokens + RS"]
+        }
+    },
+    {
+        "file": "SpeedyFeed.pdf",
+        "qa": {
+            "adaption": ["Fine-tuning"],
+            "base_model": ["UniLMv2-base/UniLM"],
+            "task": ["Conversational RS The news recommender is to predict user’s future news preference given their news clicks in history."],
+            "paradigm": ["LLM Embeddings + RS"]
+        }
+    },
+    {
+        "file": "RankGPT.pdf",
+        "qa": {
+            "adaption": ["Prompting", "Fine-tuning", "Prompt Tuning"],
+            "base_model": ["GPT-3.5", "DeBERTa-V3-base", "LLaMA-7B"],
+            "task": ["Passage Reranking", "IR", "Multilingual passage retrieval"],
+            "paradigm": ["LLM as RS", "LLM Embeddings + RS"]
+        }
+    }
+]
