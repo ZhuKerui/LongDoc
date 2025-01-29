@@ -17,3 +17,6 @@ pymupdf4llm
 pytextrank
 fastcoref
 chromadb
+dash
+dash_cytoscape
+bert_score
