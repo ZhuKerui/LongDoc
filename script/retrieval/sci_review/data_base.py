@@ -4,7 +4,8 @@ from pydantic import BaseModel
 import requests
 import evaluate
 from nltk.tokenize import word_tokenize
-from nltk import sent_tokenize, ngrams
+from nltk import ngrams
+from spacy import Language
 
 class EvalMetrics:
     def __init__(self):
@@ -75,18 +76,20 @@ def get_sent_ids(sents:list[str], unique_ngram2sent):
     sent_ids = list[int]()
     for sent in sents:
         tokenized_sent = word_tokenize(sent)
-        sent_ngrams = {ngram for n in range(2, 6) for ngram in ngrams(tokenized_sent, n)}
+        sent_ngrams = {ngram for n in range(2, 8) for ngram in ngrams(tokenized_sent, n)}
         sent_unique_ngrams = sent_ngrams.intersection(unique_ngram2sent)
-        if sent_unique_ngrams:
-            sent_ids.append(unique_ngram2sent[sent_unique_ngrams.pop()][0])
+        sent_ids.append(unique_ngram2sent[sent_unique_ngrams.pop()][0] if sent_unique_ngrams else -1)
     return sent_ids
 
 def get_binary_sent_ids(sents:list[str], unique_ngram2sent:dict[tuple, tuple[int, str]]):
     sent_ids = [0] * (max(sent[0] for ngram, sent in unique_ngram2sent.items()) + 1)
     for sent in sents:
         tokenized_sent = word_tokenize(sent)
-        sent_ngrams = {ngram for n in range(2, 6) for ngram in ngrams(tokenized_sent, n)}
+        sent_ngrams = {ngram for n in range(2, 8) for ngram in ngrams(tokenized_sent, n)}
         sent_unique_ngrams = sent_ngrams.intersection(unique_ngram2sent)
         if sent_unique_ngrams:
             sent_ids[unique_ngram2sent[sent_unique_ngrams.pop()][0]] = 1
     return sent_ids
+
+def spacy_sent_tokenize(nlp:Language, text:str):
+    return [sent.text for sent in nlp(text, disable=["lemmatizer", "ner", "positionrank", 'fastcoref']).sents]

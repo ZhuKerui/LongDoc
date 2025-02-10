@@ -110,6 +110,7 @@ class AgenticRAG(MyPipeline):
         """
 
         passages:List[str] = state["passages"]
+        question:str = state["question"]
         new_passages:List[str] = []
         new_retrieval:List[str] = []
         retrieval_called = False
@@ -144,7 +145,8 @@ class AgenticRAG(MyPipeline):
                     # Chain
                     chain = grade_doc_prompt | self.llm.with_structured_output(grade_doc_data)
                 
-                    scored_results:List[grade_doc_data] = chain.batch([{"question": tool_call['args']['query'], "context": doc} for doc in new_docs])
+                    # scored_results:List[grade_doc_data] = chain.batch([{"question": tool_call['args']['query'], "context": doc} for doc in new_docs])
+                    scored_results:List[grade_doc_data] = chain.batch([{"question": question, "context": doc} for doc in new_docs])
 
                     new_relevant_docs = [doc for doc, scored_result in zip(new_docs, scored_results) if scored_result.binary_score == "yes"]
                 
@@ -177,11 +179,7 @@ class AgenticRAG(MyPipeline):
                     for mid in range(len(v['messages'])):
                         v['messages'][mid] = v['messages'][mid].model_dump()
         with open(dump_file, 'w') as f:
-            try:
-                json.dump(process, f)
-            except:
-                print(process)
-                raise
+            json.dump(process, f)
             
             
     @staticmethod

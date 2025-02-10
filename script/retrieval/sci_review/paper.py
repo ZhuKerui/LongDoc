@@ -307,7 +307,9 @@ class DocManager:
                 lower_next_header_wo_space_num = ''.join(next_header_wo_num.split()).lower()
                 
                 startswith_section_header = False
-                if lower_block_wo_space.startswith(lower_next_header_wo_space):
+                if not self.is_from_pdf:
+                    startswith_section_header = next_section.header == block.text
+                elif lower_block_wo_space.startswith(lower_next_header_wo_space):
                     startswith_section_header = True
                 elif lower_block_wo_space.startswith(lower_next_header_wo_space_num):
                     next_section.header = next_section.header.split(maxsplit=1)[1]
