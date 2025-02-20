@@ -116,31 +116,18 @@ class DocManager:
         
         self.word_vocab = word_vocab or set()
         
-    def load_doc(self, doc_file:str = None, doc_strs:list[str] = None, outline:str = None, simple_load:bool = False):
-        assert (doc_file is not None) ^ (doc_strs is not None), "Only doc_file or doc_strs should be not None"
-        
-        self.doc_vocab = copy.deepcopy(self.word_vocab)
-        self.simple_load = simple_load
-        
-        if doc_file:
-            self.is_from_pdf = True
-            self.pdf_doc = pymupdf.open(doc_file)
-            self.remove_tables()
-            self.extract_blocks()
-            outline = outline or '\n'.join(f"{'    ' * (level - 1)}{section_name}" for level, section_name, page in self.pdf_doc.get_toc())
-        else:
-            assert all('\n' not in doc_str for doc_str in doc_strs), "doc_strs should have no \n"
-            self.is_from_pdf = False
-            self.pdf_doc = None
-            self.main_text_style = None
-            self.blocks = [DocBlock(text=doc_str, bbox=(0., 0., 0., 0.), phrases_with_hyphen=set(), potential_broken_phrases=set(), lines=[], line_start_fonts=[]) for doc_str in doc_strs]
-            outline = outline or ''
-            
+    def parse_pdf(self, pdf_file:str):
+        doc_vocab = copy.deepcopy(self.word_vocab)
+        pdf_doc = pymupdf.open(pdf_file)
+        DocManager.remove_tables(pdf_doc)
+        blocks, main_text_style = DocManager.extract_blocks(pdf_doc)
+        blocks = DocManager.handle_broken_phrases(blocks, doc_vocab)
+        outline = '\n'.join(f"{'    ' * (level - 1)}{section_name}" for level, section_name, page in pdf_doc.get_toc())
         if not outline:
-            outline = self.generate_outline()
+            outline = self.generate_outline(blocks)
         
         re_gen_cnt = 0
-        outline_pass, err_msg = self.parse_outline(outline)
+        outline_pass, err_msg, blocks, sections, meta_data = DocManager.parse_outline(outline, blocks, is_from_pdf=True, main_text_style=main_text_style)
         err_msg_cnt = Counter()
         while not outline_pass:
             re_gen_cnt += 1
@@ -150,59 +137,83 @@ class DocManager:
             if err_msg_cnt.most_common()[0][1] > 2:
                 print('Regeneration from beginning')
                 sleep(10)
-                outline = self.generate_outline()
+                outline = self.generate_outline(blocks)
                 err_msg_cnt.clear()
             else:
                 print(f'Regeneration attempt: {re_gen_cnt}\n\n{outline}\n\n{err_msg}')
-                outline = self.correct_outline(outline, err_msg)
-            outline_pass, err_msg = self.parse_outline(outline)
-            
-        self.full_outline = self.outline
-        self.reduce_noise()
-        self.index_blocks()
-        if not self.simple_load:
+                outline = self.correct_outline(blocks, outline, err_msg)
+            outline_pass, err_msg, blocks, sections, meta_data = self.parse_outline(outline, blocks, is_from_pdf=True, main_text_style=main_text_style)
+        
+        blocks, sections = DocManager.reduce_noise(blocks, sections, doc_vocab)
+        return blocks, sections, meta_data, DocManager.outline_from_sections(sections), main_text_style, doc_vocab
+        
+    def load_doc(self, doc_strs:list[str], outline:str, simple_load:bool = False):
+        assert all('\n' not in doc_str for doc_str in doc_strs), "doc_strs should have no \n"
+        assert outline, "Outline should not be empty"
+        
+        self.doc_vocab = copy.deepcopy(self.word_vocab)
+        blocks = [DocBlock(text=doc_str, bbox=(0., 0., 0., 0.), phrases_with_hyphen=set(), potential_broken_phrases=set(), lines=[], line_start_fonts=[]) for doc_str in doc_strs]
+        
+        outline_pass, err_msg, blocks, sections, meta_data = DocManager.parse_outline(outline, blocks, is_from_pdf=False)
+        assert outline_pass, err_msg
+        
+        self.blocks = blocks
+        self.sections = sections
+        self.meta_data = meta_data
+        
+        self.index_blocks(simple_load)
+        if not simple_load:
             self.collect_keyphrases()
             self.build_dkg()
 
     @property
     def doc_str(self):
-        return PARAGRAPH_SEP.join(block.text for block in self.blocks)
+        return DocManager.doc_str_from_blocks(self.blocks)
     
     @property
     def doc_str_wo_headers(self):
-        return PARAGRAPH_SEP.join(block.text for block in self.blocks if not block.is_section_header)
+        return DocManager.doc_str_from_blocks([block for block in self.blocks if not block.is_section_header])
+    
+    @staticmethod
+    def doc_str_from_blocks(blocks:list[DocBlock]):
+        return PARAGRAPH_SEP.join(block.text for block in blocks)
+    
+    @staticmethod
+    def outline_generation_prompt(blocks:list[DocBlock]):
+        return f"Paper:\n\n{DocManager.doc_str_from_blocks(blocks)}\n\nExtract the complete table of contents (bookmarks) from the above paper. Write one section a line and use the original section number if exists. You should include the {ABS_HEADER.capitalize()}, the {INTRO_HEADER.capitalize()} and the {REF_HEADER.capitalize()} section. Use indentation to show the hierarchy of the sections."
     
     @property
-    def outline_generation_prompt(self):
-        return f"Paper:\n\n{self.doc_str}\n\nExtract the complete table of contents (bookmarks) from the above paper. Write one section a line and use the original section number if exists. You should include the {ABS_HEADER.capitalize()}, the {INTRO_HEADER.capitalize()} and the {REF_HEADER.capitalize()} section. Use indentation to show the hierarchy of the sections."
-    @property
     def outline(self):
-        return '\n'.join('    ' * section.level + section.header for section in self.sections)
+        return DocManager.outline_from_sections(self.sections)
+    
+    @staticmethod
+    def outline_from_sections(sections:list[OutlineSection]):
+        return '\n'.join('    ' * section.level + section.header for section in sections)
     
     @property
     def sents(self):
         return [section.section_nlp_global[sent.start:sent.end] for section in self.sections if section.section_nlp_global for sent in section.section_nlp_local.sents]
 
-    def generate_outline(self):
+    def generate_outline(self, blocks:list[DocBlock]):
         print('Generating outline')
         chat_completion = self.client.chat.completions.create(
             messages=[
                 {
                     "role": "user",
-                    "content": self.outline_generation_prompt,
+                    "content": DocManager.outline_generation_prompt(blocks),
                 }
             ],
             model=self.tool_llm,
         )
         return chat_completion.choices[0].message.content
         
-    def correct_outline(self, outline:str, err_msg:str):
+    def correct_outline(self, blocks:list[DocBlock], outline:str, err_msg:str):
         print('Correcting outline')
         chat_completion = self.client.chat.completions.create(
             messages=[
                 {
                     "role": "user",
-                    "content": self.outline_generation_prompt,
+                    "content": DocManager.outline_generation_prompt(blocks),
                 },{
                     "role": "assistant",
                     "content": outline
@@ -260,7 +271,8 @@ class DocManager:
                 break
         return extracted_text if from_start else extracted_text[::-1]
         
-    def parse_outline(self, outline:str):
+    @staticmethod
+    def parse_outline(outline:str, blocks:list[DocBlock], is_from_pdf:bool = False, main_text_style:tuple[float, str] = None):
         # Remove generated prompt if any
         outline = outline.strip()
         if PARAGRAPH_SEP in outline:
@@ -287,15 +299,15 @@ class DocManager:
             sections.append(current_section)
 
         meta_data = list[DocBlock]()
-        blocks = copy.deepcopy(self.blocks)
+        new_blocks = copy.deepcopy(blocks)
         temp_content = list[DocBlock]()
         curr_sid, bid = -1, 0
         next_section: OutlineSection
         lower_next_header_wo_space: str
         lower_next_header_wo_space_num: str
                 
-        while bid < len(blocks):
-            block = blocks[bid]
+        while bid < len(new_blocks):
+            block = new_blocks[bid]
             
             if curr_sid + 1 < len(sections):
                 lower_block_wo_space = ''.join(block.text.split()).lower()
@@ -309,7 +321,7 @@ class DocManager:
                 lower_next_header_wo_space_num = ''.join(next_header_wo_num.split()).lower()
                 
                 startswith_section_header = False
-                if not self.is_from_pdf:
+                if not is_from_pdf:
                     startswith_section_header = next_section.header == block.text
                 elif lower_block_wo_space.startswith(lower_next_header_wo_space):
                     startswith_section_header = True
@@ -321,7 +333,7 @@ class DocManager:
                     new_block = copy.deepcopy(block)
                     block.text = DocManager.strip_fixed_text(block.text, lower_next_header_wo_space, from_start=False)
                     new_block.text = next_section.header
-                    blocks.insert(bid+1, new_block)
+                    new_blocks.insert(bid+1, new_block)
                 elif lower_next_header_wo_space in lower_block_wo_space or lower_next_header_wo_space_num in lower_block_wo_space:
                     for lid in range(len(block.lines)):
                         sub_block = ' '.join(block.lines[lid:])
@@ -335,7 +347,7 @@ class DocManager:
                             sub_block_wo_space_num = sub_block_wo_space
                         lower_sub_block_wo_space_num = sub_block_wo_space_num.lower()
                         
-                        if (lower_sub_block_wo_space.startswith(lower_next_header_wo_space) or lower_sub_block_wo_space.startswith(lower_next_header_wo_space_num) or lower_sub_block_wo_space_num.startswith(lower_next_header_wo_space_num)) and (sub_block_start_font != self.main_text_style or sub_block_startswith_number) and (lid == 0 or block.lines[lid-1][-1] in PUNCTUATION_WITHOUT_HYPHEN) and sub_block_wo_space_num[0].isupper():
+                        if (lower_sub_block_wo_space.startswith(lower_next_header_wo_space) or lower_sub_block_wo_space.startswith(lower_next_header_wo_space_num) or lower_sub_block_wo_space_num.startswith(lower_next_header_wo_space_num)) and (sub_block_start_font != main_text_style or sub_block_startswith_number) and (lid == 0 or block.lines[lid-1][-1] in PUNCTUATION_WITHOUT_HYPHEN) and sub_block_wo_space_num[0].isupper():
                             if lid > 0:
                                 new_block = copy.deepcopy(block)
                                 block.text = ' '.join(block.lines[:lid])
@@ -344,7 +356,7 @@ class DocManager:
                                 new_block.text = sub_block
                                 new_block.lines = new_block.lines[lid:]
                                 new_block.line_start_fonts = new_block.line_start_fonts[lid:]
-                                blocks.insert(bid+1, new_block)
+                                new_blocks.insert(bid+1, new_block)
                             else:
                                 prefix_wo_space = lower_sub_block_wo_space[:lower_sub_block_wo_space.index(lower_next_header_wo_space_num)]
                                 prefix = DocManager.extract_fixed_text(sub_block, prefix_wo_space).strip()
@@ -376,9 +388,9 @@ class DocManager:
                                     new_line = new_line[1:]
                                 new_line = new_line.strip()
                                 new_block.lines = [new_line] + new_block.lines[lid+1:]
-                                new_block.line_start_fonts = [self.main_text_style] + new_block.line_start_fonts[lid+1:]
+                                new_block.line_start_fonts = [main_text_style] + new_block.line_start_fonts[lid+1:]
                                 new_block.text = ' '.join(new_block.lines)
-                                blocks.insert(bid+1, new_block)
+                                new_blocks.insert(bid+1, new_block)
                                 break
                         
                     block.is_section_header = True
@@ -394,24 +406,23 @@ class DocManager:
         
         if curr_sid + 1 < len(sections):
             if any(DocManager.block_endswith(block.text, lower_next_header_wo_space_num) or DocManager.block_startswith(block.text, lower_next_header_wo_space_num) or DocManager.block_startswith(block.text, lower_next_header_wo_space) for section in sections[:curr_sid+1] for block in section.blocks):
-                return False, f"The following section name is placed in the wrong position in the table of content. Please check the section names before this section name and ensure that all sections exist and are listed in the correct order as they appear in the paper.\n\n{next_section.header}"
+                return False, f"The following section name is placed in the wrong position in the table of content. Please check the section names before this section name and ensure that all sections exist and are listed in the correct order as they appear in the paper.\n\n{next_section.header}", blocks, sections, meta_data
             
-            # return False, f"The following section name does not appear in the paper. Please review the paper and ensure that all listed section names are accurately included in the text.\n\n{next_section.header}"
             print(f'Automatically dropping {next_section.header}')
-            outline = '\n'.join('    ' * section.level + section.header for section in sections)
+            outline = DocManager.outline_from_sections(sections)
             outline = outline.replace(next_section.header, '')
             outline = '\n'.join([line for line in outline.splitlines() if line.strip()])
-            return self.parse_outline(outline)
+            return DocManager.parse_outline(outline, blocks, is_from_pdf, main_text_style)
         
         for header in [ABS_HEADER, REF_HEADER, INTRO_HEADER]:
-            if not any(section.header.lower().endswith(header) for section in sections) and any(DocManager.block_endswith(block.text, header) or DocManager.block_startswith(block.text, header) for block in blocks):
-                return False, f"The {header.capitalize()} section is missing. You should find the {header.capitalize()} section and insert the {header.capitalize()} section header in its corresponding position in the table of content."
+            if not any(section.header.lower().endswith(header) for section in sections) and any(DocManager.block_endswith(block.text, header) or DocManager.block_startswith(block.text, header) for block in new_blocks):
+                return False, f"The {header.capitalize()} section is missing. You should find the {header.capitalize()} section and insert the {header.capitalize()} section header in its corresponding position in the table of content.", blocks, sections, meta_data
         
         sid = 0
         while sid < len(sections):
             section = sections[sid]
             section.section_id = sid
-            if self.is_from_pdf:
+            if is_from_pdf:
                 new_sub_section_ids = [bid for bid, block in enumerate(section.blocks[:-1]) if block.bbox == section.blocks[bid+1].bbox and not block.is_section_header]
                 if new_sub_section_ids:
                     for sub_section_id in new_sub_section_ids:
@@ -427,20 +438,15 @@ class DocManager:
                         else:
                             last_new_sub_section.blocks.append(sub_section_block)
             sid += 1
-    
-        self.blocks = blocks
-        self.sections = sections
-        self.meta_data = meta_data
         
-        return True, ''
+        return True, '', new_blocks, sections, meta_data
     
-    def reduce_noise(self):
-        if not self.is_from_pdf:
-            return
-        xmin, _, xmax, _ = self.blocks[0].bbox
+    @staticmethod
+    def reduce_noise(blocks:list[DocBlock], sections:list[OutlineSection], doc_vocab:set[str]):
+        xmin, _, xmax, _ = blocks[0].bbox
         xs = []
         section:OutlineSection
-        for section in self.sections:
+        for section in sections:
             if section.header.lower().endswith(REF_HEADER) or section.header.lower().endswith(ACK_HEADER) or section.header.lower().endswith(ACK_HEADER+'s'):
                 break
             for block in section.blocks:
@@ -457,7 +463,7 @@ class DocManager:
         new_blocks = list[DocBlock]()
         new_sections = list[OutlineSection]()
         last_block:DocBlock = None
-        for section in self.sections:
+        for section in sections:
             if section.header.lower().endswith(REF_HEADER) or section.header.lower().endswith(ACK_HEADER) or section.header.lower().endswith(ACK_HEADER+'s'):
                 break
             new_section_blocks = list[DocBlock]()
@@ -478,18 +484,18 @@ class DocManager:
                         last_block = block
                         
                     for potential_broken_phrase in potential_broken_phrases:
-                        if all(word.lower() in self.doc_vocab for word in potential_broken_phrase.split('-')):
+                        if all(word.lower() in doc_vocab for word in potential_broken_phrase.split('-')):
                             continue
                         tokens = potential_broken_phrase.split('-')
-                        token_validity = [token in self.doc_vocab for token in tokens]
+                        token_validity = [token in doc_vocab for token in tokens]
                         invalid_token_idx = token_validity.index(False)
                         if invalid_token_idx < len(tokens) - 1:
-                            if f'{tokens[invalid_token_idx]}{tokens[invalid_token_idx+1]}'.lower() in self.doc_vocab:
+                            if f'{tokens[invalid_token_idx]}{tokens[invalid_token_idx+1]}'.lower() in doc_vocab:
                                 fixed_phrase = potential_broken_phrase.replace(f'{tokens[invalid_token_idx]}-{tokens[invalid_token_idx+1]}', f'{tokens[invalid_token_idx]}{tokens[invalid_token_idx+1]}')
                                 last_block.text = last_block.text.replace(potential_broken_phrase, fixed_phrase)
                                 continue
                         if invalid_token_idx > 0:
-                            if f'{tokens[invalid_token_idx-1]}{tokens[invalid_token_idx]}'.lower() in self.doc_vocab:
+                            if f'{tokens[invalid_token_idx-1]}{tokens[invalid_token_idx]}'.lower() in doc_vocab:
                                 fixed_phrase = potential_broken_phrase.replace(f'{tokens[invalid_token_idx-1]}-{tokens[invalid_token_idx]}', f'{tokens[invalid_token_idx-1]}{tokens[invalid_token_idx]}')
                                 last_block.text = last_block.text.replace(potential_broken_phrase, fixed_phrase)
                                 continue
@@ -520,13 +526,12 @@ class DocManager:
                 else:
                     last_section.children.append(section)
                     section.parent = last_section
-            
-        self.blocks = new_blocks
-        self.sections = new_sections
+
+        return new_blocks, new_sections
         
-    def index_blocks(self):
+    def index_blocks(self, simple_load:bool = False):
         # Finalize the sections and blocks
-        doc_spacy = self.nlp(self.doc_str_wo_headers, disable=['fastcoref'] if not self.simple_load else ['fastcoref', "lemmatizer", "ner", "positionrank"])
+        doc_spacy = self.nlp(self.doc_str_wo_headers, disable=['fastcoref'] if not simple_load else ['fastcoref', "lemmatizer", "ner", "positionrank"])
         tid2section_id = np.ones(len(doc_spacy), dtype=int) * -1
         tid2sent_id = np.ones(len(doc_spacy), dtype=int) * -1
         
@@ -541,7 +546,7 @@ class DocManager:
         section_nlp_global:Span
         for section, section_nlp_global in zip(section_with_content, DocManager.iterate_find(doc_spacy, section_contents)):
             section.section_nlp_global = section_nlp_global
-            section.section_nlp_local = self.nlp(section_nlp_global.text, disable=["lemmatizer", "ner", "positionrank"] if not self.simple_load else ['fastcoref', "lemmatizer", "ner", "positionrank"])
+            section.section_nlp_local = self.nlp(section_nlp_global.text, disable=["lemmatizer", "ner", "positionrank"] if not simple_load else ['fastcoref', "lemmatizer", "ner", "positionrank"])
             tid2section_id[section.section_nlp_global.start:section.section_nlp_global.end] = section.section_id
             
         for sent_id, sent in enumerate(doc_spacy.sents):
@@ -623,6 +628,8 @@ class DocManager:
         new_span_ranges.sort()
         new_span_ranges = merge_overlapping_spans(new_span_ranges)
         self.phrases = [self.doc_spacy[span_range[0]:span_range[1]] for span_range in new_span_ranges]
+        if self.chunks:
+            self.pid2chunk_ids = {pid: set(self.tid2chunk_id[phrase.start:phrase.end]) for pid, phrase in enumerate(self.phrases)}
         self.tid2phrase_id = get_tid2phrase_id(new_span_ranges)
                     
     def build_dkg(self):
@@ -1038,7 +1045,7 @@ class DocManager:
                     self.tid2chunk_id[chunk.start:chunk.end] = cid
                     cid += 1
         
-        if not self.simple_load:
+        if self.phrases:
             self.pid2chunk_ids = {pid: set(self.tid2chunk_id[phrase.start:phrase.end]) for pid, phrase in enumerate(self.phrases)}
         
         if hasattr(self, 'vectorstore'):
@@ -1172,18 +1179,20 @@ class DocManager:
     def block_endswith(block:str, suffix:str):
         return ''.join(block.split()).lower().endswith(''.join(suffix.split()).lower())
     
-    def remove_tables(self):
-        for page in self.pdf_doc:
+    @staticmethod
+    def remove_tables(pdf_doc:pymupdf.open):
+        for page in pdf_doc:
             for table in page.find_tables():
                 page.add_redact_annot(table.bbox)
             page.apply_redactions()
     
-    def extract_blocks(self):
-        block_dicts = [block_dict for page in self.pdf_doc for block_dict in page.get_textpage().extractRAWDICT()['blocks']]
+    @staticmethod
+    def extract_blocks(pdf_doc:pymupdf.open):
+        block_dicts = [block_dict for page in pdf_doc for block_dict in page.get_textpage().extractRAWDICT()['blocks']]
         blocks = [DocManager.get_block_from_dict(block_dict) for block_dict in block_dicts]
         
         # Get the main text style
-        size_cnt:dict[str, int] = Counter()
+        size_cnt:dict[tuple[float, str], int] = Counter()
         for block, block_dict in zip(blocks, block_dicts):
             if DocManager.block_endswith(block.text, REF_HEADER) or DocManager.block_startswith(block.text, REF_HEADER):
                 break
@@ -1192,22 +1201,23 @@ class DocManager:
                     size_cnt[(round(span['size'], 0), span['font'])] += len(span['chars'])
 
         blocks = [block for block in blocks if block.text]
-        self.main_text_style = size_cnt.most_common()[0][0]
-        self.blocks = self.handle_broken_phrases(blocks)
+        main_text_style = size_cnt.most_common()[0][0]
+        return blocks, main_text_style
         
-    def handle_broken_phrases(self, blocks:list[DocBlock]):
+    @staticmethod
+    def handle_broken_phrases(blocks:list[DocBlock], doc_vocab:set[str]):
         finalized_blocks = list[DocBlock]()
         for block in blocks:
             phrases = [phrase.strip(PUNCTUATION_WITHOUT_HYPHEN) for phrase in block.text.split()]
-            self.doc_vocab.update(phrase.lower() for phrase in phrases if '-' not in phrase)
-            self.doc_vocab.update(word.lower() for phrase in block.phrases_with_hyphen for word in phrase.split('-'))
+            doc_vocab.update(phrase.lower() for phrase in phrases if '-' not in phrase)
+            doc_vocab.update(word.lower() for phrase in block.phrases_with_hyphen for word in phrase.split('-'))
             potential_broken_phrases = {phrase for phrase in phrases if '-' in phrase and phrase not in block.phrases_with_hyphen}
             for potential_broken_phrase in list(potential_broken_phrases):
                 if potential_broken_phrase.endswith('-'):
                     potential_broken_phrases.remove(potential_broken_phrase)
                 
-                elif all(word in self.doc_vocab for word in potential_broken_phrase.split('-')):
-                    if potential_broken_phrase.replace('-', '').lower() in self.doc_vocab:
+                elif all(word in doc_vocab for word in potential_broken_phrase.split('-')):
+                    if potential_broken_phrase.replace('-', '').lower() in doc_vocab:
                         fixed_phrase = potential_broken_phrase.replace('-', '')
                         block.text = block.text.replace(potential_broken_phrase, fixed_phrase)
                         block.lines = [line.replace(potential_broken_phrase, fixed_phrase) for line in block.lines]
@@ -1216,17 +1226,17 @@ class DocManager:
                     
                 else:
                     tokens = potential_broken_phrase.split('-')
-                    token_validity = [token in self.doc_vocab for token in tokens]
+                    token_validity = [token in doc_vocab for token in tokens]
                     invalid_token_idx = token_validity.index(False)
                     if invalid_token_idx < len(tokens) - 1:
-                        if f'{tokens[invalid_token_idx]}{tokens[invalid_token_idx+1]}'.lower() in self.doc_vocab:
+                        if f'{tokens[invalid_token_idx]}{tokens[invalid_token_idx+1]}'.lower() in doc_vocab:
                             potential_broken_phrases.remove(potential_broken_phrase)
                             fixed_phrase = potential_broken_phrase.replace(f'{tokens[invalid_token_idx]}-{tokens[invalid_token_idx+1]}', f'{tokens[invalid_token_idx]}{tokens[invalid_token_idx+1]}')
                             block.text = block.text.replace(potential_broken_phrase, fixed_phrase)
                             block.lines = [line.replace(potential_broken_phrase, fixed_phrase) for line in block.lines]
                             continue
                     if invalid_token_idx > 0:
-                        if f'{tokens[invalid_token_idx-1]}{tokens[invalid_token_idx]}'.lower() in self.doc_vocab:
+                        if f'{tokens[invalid_token_idx-1]}{tokens[invalid_token_idx]}'.lower() in doc_vocab:
                             potential_broken_phrases.remove(potential_broken_phrase)
                             fixed_phrase = potential_broken_phrase.replace(f'{tokens[invalid_token_idx-1]}-{tokens[invalid_token_idx]}', f'{tokens[invalid_token_idx-1]}{tokens[invalid_token_idx]}')
                             block.text = block.text.replace(potential_broken_phrase, fixed_phrase)

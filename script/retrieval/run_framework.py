@@ -73,9 +73,9 @@ with jsonlines.open(dataset_file) as f_in:
                             )
 
                 elif command == 'eval':
-                    unique_ngram2sent = get_sent_index([sent.text for section in doc_manager.sections if section.section_nlp_local for sent in section.section_nlp_local.sents])
+                    unique_ngram2sent = get_chunk_index([sent.text for section in doc_manager.sections if section.section_nlp_local for sent in section.section_nlp_local.sents])
                     if load_from_pdf:
-                        valid_sent_ids = get_sent_ids([sent for block in sample.doc_strs for sent in spacy_sent_tokenize(doc_manager.nlp, block)], unique_ngram2sent)
+                        valid_sent_ids = get_chunk_ids([sent for block in sample.doc_strs for sent in spacy_sent_tokenize(doc_manager.nlp, block)], unique_ngram2sent)
                         if -1 in valid_sent_ids:
                             print(f'Invalid sent id in sample {sid}, retrieval_config {retrieval_config}, {valid_sent_ids.count(-1)}/{len(valid_sent_ids)}')
                             valid_sent_ids = [sent_id for sent_id in valid_sent_ids if sent_id > -1]

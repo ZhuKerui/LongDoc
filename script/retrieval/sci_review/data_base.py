@@ -115,7 +115,7 @@ def download_acl_pdf(acl_id:str, filename:str):
     
 def get_arxiv_paper_text(arxiv_id:str):
     link = f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}"
-    response = requests.get(link, verify=False)
+    response = requests.get(link)
 
     # Parse the HTML content
     soup = BeautifulSoup(response.text, "html.parser")
@@ -123,11 +123,13 @@ def get_arxiv_paper_text(arxiv_id:str):
     paragraphs = list[str]()
     headers = []
     title_text = ''
+    abstract_text = ''
+    abstract_title = None
     p:Tag
     for p in soup.find_all(class_={'ltx_para', 'ltx_title', 'ltx_abstract'}):
         if 'ltx_title_bibliography' in p['class'] or 'ltx_title_acknowledgements' in p['class']:
             break
-        is_paragraph = p.name == 'div' and 'ltx_para' in p['class'] and re.match(r"^S\d+\.+(p|S)", p['id'])
+        is_paragraph = p.name == 'div' and 'ltx_para' in p['class'] and ('id' in p.attrs and re.match(r"^S\d+\.+(p|S)", p['id']))
         is_header = re.fullmatch(r"^h\d+", p.name) is not None
         is_abstract = 'ltx_abstract' in p['class']
         is_abstract_title = 'ltx_title_abstract' in p['class']
@@ -153,61 +155,77 @@ def get_arxiv_paper_text(arxiv_id:str):
                 paragraphs.append(block_text)
                 if is_header:
                     headers.append((block_text, p.name))
-    paragraphs.insert(0, abstract_text)
-    paragraphs.insert(0, abstract_title[0])
-    headers.insert(0, abstract_title)
-    header_size_min = min(int(header[1][1:]) for header in headers)
-    outline = '\n'.join(('    ' * ((int(header_size[1:]) - header_size_min) if hid > 0 else 0)) + header for hid, (header, header_size) in enumerate(headers))
+    if abstract_text:
+        paragraphs.insert(0, abstract_text)
+        if abstract_title:
+            paragraphs.insert(0, abstract_title[0])
+            headers.insert(0, abstract_title)
+        else:
+            paragraphs.insert(0, 'Abstract')
+            headers.insert(0, ('Abstract', 'h2'))
+    if headers:
+        header_size_min = min(int(header[1][1:]) for header in headers)
+        outline = '\n'.join(('    ' * ((int(header_size[1:]) - header_size_min) if hid > 0 else 0)) + header for hid, (header, header_size) in enumerate(headers))
+    else:
+        outline = ''
     return paragraphs, outline, title_text
     
 # Dataset Sample
 class Sample(BaseModel):
+    # Doc info
     doc_file: str = '' # ACL:$ or ArXiv:$
-    doc_str: str = ''
-    doc_strs: list[str] = []
+    doc_blocks: list[str] = []
     outline: str = ''
+    doc_blocks_with_label: list[bool] = [] # len(doc_blocks) == len(doc_blocks_with_label)
+    
+    # Question info
     question_types: list[str] = []
-    questions: dict[str, list[str]] = {}
-    question_meta: dict[str, dict] = {}
-    answers: dict[str, str] = {}
-    extractions: dict[str, list[str]] = {}
+    questions: dict[str, list[str]] = {} # question_type -> [question]
+    question_meta: dict[str, dict] = {} # question -> {meta_key: meta_value}
     
-class Extraction(BaseModel):
-    chunks: list[str] = []
-    extractions: list[str] = []
-    chunk_sources: list[list[int]] = []
+    # Answer info
+    relevant_blocks: dict[str, list[int]] = {} # question -> [block_id]
+    extractions: dict[str, list[tuple[str, list[int]]]] = {} # question -> [(extraction, [block_id])]
+    answers: dict[str, str] = {} # question -> answer
     
-def get_sent_index(sents:list[str]):
-    # sents = [sent for p in text.split(PARAGRAPH_SEP) for sent in sent_tokenize(p)]
-    ngram2sents: dict[tuple, list[tuple[int, str]]] = defaultdict(list)
-    for sid, sent in enumerate(sents):
-        tokenized_sent = word_tokenize(sent)
+    # Generation info
+    selected_blocks: dict[str, list[int]] = {} # question -> [block_id]
+    generated_extractions: dict[str, list[tuple[str, list[int]]]] = {} # question -> [(extraction, [block_id])]
+    generated_answers: dict[str, str] = {} # question -> answer
+    
+    @property
+    def doc_str(self):
+        return '\n\n'.join(self.doc_blocks)
+    
+def get_chunk_index(chunks:list[str]):
+    ngram2chunks: dict[tuple, list[tuple[int, str]]] = defaultdict(list)
+    for cid, chunk in enumerate(chunks):
+        tokenized_chunk = word_tokenize(chunk)
         for n in range(2, 8):
-            for ngram in ngrams(tokenized_sent, n):
-                ngram2sents[ngram].append((sid, sent))
+            for ngram in ngrams(tokenized_chunk, n):
+                ngram2chunks[ngram].append((cid, chunk))
 
-    unique_ngram2sent = {ngram:sents[0] for ngram, sents in ngram2sents.items() if len(sents) == 1}
-    return unique_ngram2sent
+    unique_ngram2chunk = {ngram:temp_chunks[0] for ngram, temp_chunks in ngram2chunks.items() if len(temp_chunks) == 1}
+    return unique_ngram2chunk
 
+def get_chunk_ids(chunks:list[str], unique_ngram2chunk:dict[tuple, tuple[int, str]]):
+    chunk_ids = list[set[int]]()
+    for chunk in chunks:
+        tokenized_chunk = word_tokenize(chunk)
+        chunk_ngrams = {ngram for n in range(2, 8) for ngram in ngrams(tokenized_chunk, n)}
+        chunk_unique_ngrams = chunk_ngrams.intersection(unique_ngram2chunk)
+        chunk_ids.append({unique_ngram2chunk[chunk_unique_ngram][0] for chunk_unique_ngram in chunk_unique_ngrams})
+    return chunk_ids
 
-def get_sent_ids(sents:list[str], unique_ngram2sent):
-    sent_ids = list[int]()
-    for sent in sents:
-        tokenized_sent = word_tokenize(sent)
-        sent_ngrams = {ngram for n in range(2, 8) for ngram in ngrams(tokenized_sent, n)}
-        sent_unique_ngrams = sent_ngrams.intersection(unique_ngram2sent)
-        sent_ids.append(unique_ngram2sent[sent_unique_ngrams.pop()][0] if sent_unique_ngrams else -1)
-    return sent_ids
-
-def get_binary_sent_ids(sents:list[str], unique_ngram2sent:dict[tuple, tuple[int, str]]):
-    sent_ids = [0] * (max(sent[0] for ngram, sent in unique_ngram2sent.items()) + 1)
-    for sent in sents:
-        tokenized_sent = word_tokenize(sent)
-        sent_ngrams = {ngram for n in range(2, 8) for ngram in ngrams(tokenized_sent, n)}
-        sent_unique_ngrams = sent_ngrams.intersection(unique_ngram2sent)
-        if sent_unique_ngrams:
-            sent_ids[unique_ngram2sent[sent_unique_ngrams.pop()][0]] = 1
-    return sent_ids
+def get_binary_chunk_ids(chunks:list[str], unique_ngram2chunk:dict[tuple, tuple[int, str]]):
+    chunk_ids = [0] * (max(chunk[0] for chunk in unique_ngram2chunk.values()) + 1)
+    for chunk in chunks:
+        tokenized_chunk = word_tokenize(chunk)
+        chunk_ngrams = {ngram for n in range(2, 8) for ngram in ngrams(tokenized_chunk, n)}
+        chunk_unique_ngrams = chunk_ngrams.intersection(unique_ngram2chunk)
+        for chunk_unique_ngram in chunk_unique_ngrams:
+            chunk_ids[unique_ngram2chunk[chunk_unique_ngram][0]] = 1
+    return chunk_ids
 
 def spacy_sent_tokenize(nlp:Language, text:str):
     return [sent.text for sent in nlp(text, disable=["lemmatizer", "ner", "positionrank", 'fastcoref']).sents]
