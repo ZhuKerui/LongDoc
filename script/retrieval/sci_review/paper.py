@@ -116,10 +116,11 @@ class DocManager:
         
         self.word_vocab = word_vocab or set()
         
-    def load_doc(self, doc_file:str = None, doc_strs:list[str] = None, outline:str = None):
+    def load_doc(self, doc_file:str = None, doc_strs:list[str] = None, outline:str = None, simple_load:bool = False):
         assert (doc_file is not None) ^ (doc_strs is not None), "Only doc_file or doc_strs should be not None"
         
         self.doc_vocab = copy.deepcopy(self.word_vocab)
+        self.simple_load = simple_load
         
         if doc_file:
             self.is_from_pdf = True
@@ -159,8 +160,9 @@ class DocManager:
         self.full_outline = self.outline
         self.reduce_noise()
         self.index_blocks()
-        self.collect_keyphrases()
-        self.build_dkg()
+        if not self.simple_load:
+            self.collect_keyphrases()
+            self.build_dkg()
 
     @property
     def doc_str(self):
@@ -524,8 +526,9 @@ class DocManager:
         
     def index_blocks(self):
         # Finalize the sections and blocks
-        doc_spacy = self.nlp(self.doc_str_wo_headers, disable=['fastcoref'])
+        doc_spacy = self.nlp(self.doc_str_wo_headers, disable=['fastcoref'] if not self.simple_load else ['fastcoref', "lemmatizer", "ner", "positionrank"])
         tid2section_id = np.ones(len(doc_spacy), dtype=int) * -1
+        tid2sent_id = np.ones(len(doc_spacy), dtype=int) * -1
         
         section_contents = list[str]()
         section_with_content = list[OutlineSection]()
@@ -536,13 +539,17 @@ class DocManager:
                 section_with_content.append(section)
         
         section_nlp_global:Span
-        for section, section_nlp_global, section_nlp_local in zip(section_with_content, DocManager.iterate_find(doc_spacy, section_contents), self.nlp.pipe(section_contents, disable=["lemmatizer", "ner", "positionrank"])):
+        for section, section_nlp_global in zip(section_with_content, DocManager.iterate_find(doc_spacy, section_contents)):
             section.section_nlp_global = section_nlp_global
-            section.section_nlp_local = section_nlp_local
+            section.section_nlp_local = self.nlp(section_nlp_global.text, disable=["lemmatizer", "ner", "positionrank"] if not self.simple_load else ['fastcoref', "lemmatizer", "ner", "positionrank"])
             tid2section_id[section.section_nlp_global.start:section.section_nlp_global.end] = section.section_id
             
+        for sent_id, sent in enumerate(doc_spacy.sents):
+            tid2sent_id[sent.start:sent.end] = sent_id
+
         self.doc_spacy = doc_spacy
         self.tid2section_id = tid2section_id
+        self.tid2sent_id = tid2sent_id
         
     def collect_keyphrases(self):
         def split_noun_phrases(noun_phrase:Span):
@@ -990,26 +997,17 @@ class DocManager:
                     tid2score[token.i] = 1. / (abs(token.i - phrase.root.i) * 0.5 + 1)
         
         # Build similarity matrix using TF-IDF vectors
-        corpus = [' '.join(token.lemma_ if token.pos_ in ENT_POS else token.text.lower() for token in phrase) for phrase in self.phrases]
+        corpus = [' '.join(token.lemma_ if token.pos_ in ENT_POS else token.text.lower() for token in phrase if token.pos_ not in {PUNCT, DET}) for phrase in self.phrases]
         vectorizer = TfidfVectorizer(ngram_range=(1, 4))
         tfidf_matrix = vectorizer.fit_transform(corpus)
         cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
         
         for (phrase_id_0, phrase_id_1, shared_text), tids_1s in shared_ngram_edges2tids.items():
-            # phrase_0, phrase_1 = self.phrases[phrase_id_0], self.phrases[phrase_id_1]
-            # shared_weight_0, shared_weight_1 = 0, 0
-            # for tids_0 in phrase_id2shared_text2tids[phrase_id_0][shared_text]:
-            #     shared_span_0 = phrase_0[tids_0[0]:tids_0[-1]+1]
-            #     shared_weight_0 += tid2score[shared_span_0.start:shared_span_0.end].sum() / tid2score[phrase_0.start:phrase_0.end].sum()
-            # for tids_1 in tids_1s:
-            #     shared_span_1 = phrase_1[tids_1[0]:tids_1[-1]+1]
-            #     shared_weight_1 += tid2score[shared_span_1.start:shared_span_1.end].sum() / tid2score[phrase_1.start:phrase_1.end].sum()
-            # shared_weight = (shared_weight_0 * shared_weight_1) ** -0.5 - 1
             if not dkg.has_edge(phrase_id_0, phrase_id_1, SHARED_TEXT):
-                # dkg.add_edges_from([(phrase_id_0, phrase_id_1, SHARED_TEXT), (phrase_id_1, phrase_id_0, SHARED_TEXT)], weight=cosine_sim[phrase_id_0][phrase_id_1], shared_texts=[])
-                dkg.add_edge(phrase_id_0, phrase_id_1, SHARED_TEXT, weight=cosine_sim[phrase_id_0][phrase_id_1], shared_texts=[])
-            # dkg[phrase_id_0][phrase_id_1][SHARED_TEXT]['weights'].append(shared_weight_0 * shared_weight_1)
-            dkg[phrase_id_0][phrase_id_1][SHARED_TEXT]['shared_texts'].append(shared_text2formal_text[shared_text])
+                similarity = min(cosine_sim[phrase_id_0][phrase_id_1], 1.0)
+                weight = (abs(self.tid2sent_id[self.phrases[phrase_id_1].root.i] - self.tid2sent_id[self.phrases[phrase_id_0].root.i]) + 1) * (1 - similarity)
+                if (weight <= 2 and similarity > 0.2) or similarity > 0.5:
+                    dkg.add_edge(phrase_id_0, phrase_id_1, SHARED_TEXT, weight=weight, similarity=similarity)
 
         self.dkg = dkg
     
@@ -1040,7 +1038,8 @@ class DocManager:
                     self.tid2chunk_id[chunk.start:chunk.end] = cid
                     cid += 1
         
-        self.pid2chunk_ids = {pid: set(self.tid2chunk_id[phrase.start:phrase.end]) for pid, phrase in enumerate(self.phrases)}
+        if not self.simple_load:
+            self.pid2chunk_ids = {pid: set(self.tid2chunk_id[phrase.start:phrase.end]) for pid, phrase in enumerate(self.phrases)}
         
         if hasattr(self, 'vectorstore'):
             self.vectorstore.delete_collection()
@@ -1104,7 +1103,7 @@ class DocManager:
         return DocManager.remove_space_before_punct(' '.join(text.split()))
     
     @staticmethod
-    def get_block(block:dict):
+    def get_block_from_dict(block:dict):
         lines, temp_line, line_start_fonts, temp_start_font, last_bbox_bottom_right = list[str](), '', list[tuple[float, str]](), None, 0.
         phrases_with_hyphen = set[str]()
         for lid, line in enumerate(block['lines']):
@@ -1138,6 +1137,34 @@ class DocManager:
         return DocBlock(text=DocManager.remove_space_before_punct(' '.join(lines)), bbox=block['bbox'], phrases_with_hyphen=phrases_with_hyphen, lines=lines, line_start_fonts=line_start_fonts)
 
     @staticmethod
+    def get_block_from_lines(line_texts:list[str]):
+        lines, temp_line = list[str](), ''
+        phrases_with_hyphen = set[str]()
+        for lid, line_text in enumerate(line_texts):
+            last_line = temp_line
+            temp_line += line_text
+            if re.match(r'.*(?<!-)-$', temp_line):
+                # Do not clear the temp_line if the line ends with a hyphen so that the next line can be concatenated
+                # if lid != len(block['lines']) - 1:
+                #     temp_line = temp_line[:-1]
+                pass
+            else:
+                phrases_with_hyphen.update([phrase for phrase in line_text.split() if '-' in phrase and (not line_text.startswith(phrase) or re.match(r'.*(?<!-)-$', last_line) is None)])
+                if not lines:
+                    lines.append(DocManager.remove_space_before_punct(' '.join(temp_line.split())))
+                else:
+                    lines[-1] += ' ' + DocManager.remove_space_before_punct(' '.join(temp_line.split()))
+                temp_line = ''
+                # temp_start_font = None
+        if temp_line:
+            if not lines:
+                lines.append(DocManager.remove_space_before_punct(' '.join(temp_line.split())))
+            else:
+                lines[-1] += ' ' + DocManager.remove_space_before_punct(' '.join(temp_line.split()))
+            
+        return DocBlock(text=DocManager.remove_space_before_punct(' '.join(lines)), bbox=None, phrases_with_hyphen=phrases_with_hyphen, lines=lines, line_start_fonts=None)
+
+    @staticmethod
     def block_startswith(block:str, prefix:str):
         return ''.join(block.split()).lower().startswith(''.join(prefix.split()).lower())
     
@@ -1153,7 +1180,7 @@ class DocManager:
     
     def extract_blocks(self):
         block_dicts = [block_dict for page in self.pdf_doc for block_dict in page.get_textpage().extractRAWDICT()['blocks']]
-        blocks = [DocManager.get_block(block_dict) for block_dict in block_dicts]
+        blocks = [DocManager.get_block_from_dict(block_dict) for block_dict in block_dicts]
         
         # Get the main text style
         size_cnt:dict[str, int] = Counter()
@@ -1163,13 +1190,14 @@ class DocManager:
             for line in block_dict['lines']:
                 for span in line['spans']:
                     size_cnt[(round(span['size'], 0), span['font'])] += len(span['chars'])
-        main_text_style = size_cnt.most_common()[0][0]
+
+        blocks = [block for block in blocks if block.text]
+        self.main_text_style = size_cnt.most_common()[0][0]
+        self.blocks = self.handle_broken_phrases(blocks)
         
-        # Extract block text and update the document vocabulary
+    def handle_broken_phrases(self, blocks:list[DocBlock]):
         finalized_blocks = list[DocBlock]()
         for block in blocks:
-            if not block.text:
-                continue
             phrases = [phrase.strip(PUNCTUATION_WITHOUT_HYPHEN) for phrase in block.text.split()]
             self.doc_vocab.update(phrase.lower() for phrase in phrases if '-' not in phrase)
             self.doc_vocab.update(word.lower() for phrase in block.phrases_with_hyphen for word in phrase.split('-'))
@@ -1207,9 +1235,7 @@ class DocManager:
                     
             block.potential_broken_phrases = potential_broken_phrases
             finalized_blocks.append(block)
-        
-        self.main_text_style = main_text_style
-        self.blocks = finalized_blocks
+        return finalized_blocks
 
     # --------------------------- Spacy Related Functions ---------------------------
     @staticmethod
@@ -1338,7 +1364,7 @@ class DocManager:
                     y_start += 50
                 y_start += 100
                 
-        edges = [{'data': {'source': self.phrases[u].start, 'target': self.phrases[v].start, 'type': edge_type, 'weight': weight * 0.5}} for u, v, edge_type, weight in self.dkg.edges(data='weight', keys=True)]
+        edges = [{'data': {'source': self.phrases[u].start, 'target': self.phrases[v].start, 'type': edge_type, 'similarity': similarity * 0.5}} for u, v, edge_type, similarity in self.dkg.edges(data='similarity', keys=True)]
 
         app = dash.Dash(__name__)
         app.layout = html.Div([
@@ -1420,7 +1446,7 @@ class DocManager:
                             'line-color': "#4FC1FF", 
                             'line-style': 'dashed',
                             'target-arrow-color': "#4FC1FF",
-                            'opacity': 'data(weight)'
+                            'opacity': 'data(similarity)'
                         }
                     }
                 ]

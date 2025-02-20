@@ -6,12 +6,12 @@ from langgraph.graph import END, StateGraph, START
 
 # LangGraph Pipeline
 class MyPipeline:
-    def __init__(self, enable_trace:bool=False, project_name:str=None):
+    def __init__(self, enable_trace:bool=False, project_name:str=None, llm_model:str=GPT_MODEL_CHEAP):
         self.enable_trace = enable_trace
         self.project_name = project_name
         self.doc_manager:DocManager = None
         # Load LLM
-        self.llm = ChatOpenAI(model=GPT_MODEL_CHEAP, temperature=0, api_key=os.environ.get(OPENAI_API_KEY_VARIABLE, default=None))
+        self.llm = ChatOpenAI(model=llm_model, temperature=0, api_key=os.environ.get(OPENAI_API_KEY_VARIABLE, default=None))
         # self.load_langgraph()
         
     def __call__(self, question:str):

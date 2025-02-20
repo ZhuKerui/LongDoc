@@ -22,8 +22,8 @@ class AgenticRAG(MyPipeline):
         question: str
         retrieval: List[str]
     
-    def __init__(self, enable_trace = False, project_name = None):
-        super().__init__(enable_trace, project_name)
+    def __init__(self, enable_trace = False, project_name = None, llm_model = GPT_MODEL_CHEAP):
+        super().__init__(enable_trace, project_name, llm_model)
         
         
     def load_langgraph(self, tools:List[BaseTool] = []):
