@@ -15,42 +15,42 @@ question_type2question = {
     'outcome': outcome_question
 }
 
-def eval_aclsum(
-    doc_manager:DocManager,
-    eval_metrics:EvalMetrics,
-    valid_sent_ids:set[int],
-    unique_ngram2sent:dict[tuple, tuple[int, str]],
-    retrieval_method:str,
-    prefix:str, 
-    sid:int, 
-    sample:Sample, 
-    load_from_pdf:bool, 
-    question_type:str, 
-    sent_chunk:bool, 
-    max_seq_len:int, 
-    k:int = None, 
-    is_temp=False
-    ):
-    _, retrieved_sents = get_sents_and_process(
-        doc_manager=doc_manager,
-        retrieval_method=retrieval_method,
-        prefix=prefix,
-        sid=sid,
-        question_type=question_type,
-        load_from_pdf=load_from_pdf,
-        sent_chunk=sent_chunk,
-        max_seq_len=max_seq_len,
-        k=k,
-        is_temp=is_temp,
-        data_dir=ACLSUM_DIR)
-    if not retrieved_sents:
-        return {'sid': sid, 'precision': 0, 'recall': 0, 'f1': 0}
-    retrieved_sent_ids = [sent_label if sent_id in valid_sent_ids else 0 for sent_id, sent_label in enumerate(get_binary_chunk_ids(retrieved_sents, unique_ngram2sent))]
-    gold_sent_ids = [sent_label if sent_id in valid_sent_ids else 0 for sent_id, sent_label in enumerate(get_binary_chunk_ids(sample.extractions[question_type], unique_ngram2sent))]
+# def eval_aclsum(
+#     doc_manager:DocManager,
+#     eval_metrics:EvalMetrics,
+#     valid_sent_ids:set[int],
+#     unique_ngram2sent:dict[tuple, tuple[int, str]],
+#     retrieval_method:str,
+#     prefix:str, 
+#     sid:int, 
+#     sample:Sample, 
+#     load_from_pdf:bool, 
+#     question_type:str, 
+#     sent_chunk:bool, 
+#     max_seq_len:int, 
+#     k:int = None, 
+#     is_temp=False
+#     ):
+#     _, retrieved_sents = get_sents_and_process(
+#         doc_manager=doc_manager,
+#         retrieval_method=retrieval_method,
+#         prefix=prefix,
+#         sid=sid,
+#         question_type=question_type,
+#         load_from_pdf=load_from_pdf,
+#         sent_chunk=sent_chunk,
+#         max_seq_len=max_seq_len,
+#         k=k,
+#         is_temp=is_temp,
+#         data_dir=ACLSUM_DIR)
+#     if not retrieved_sents:
+#         return {'sid': sid, 'precision': 0, 'recall': 0, 'f1': 0}
+#     retrieved_sent_ids = [sent_label if sent_id in valid_sent_ids else 0 for sent_id, sent_label in enumerate(get_binary_chunk_ids(retrieved_sents, unique_ngram2sent))]
+#     gold_sent_ids = [sent_label if sent_id in valid_sent_ids else 0 for sent_id, sent_label in enumerate(get_binary_chunk_ids(sample.extractions[question_type], unique_ngram2sent))]
     
-    eval_result:dict[str, Any] = eval_metrics.eval_precision_recall_f1(predictions=retrieved_sent_ids, references=gold_sent_ids)
-    eval_result.update({'sid': sid})
-    return eval_result
+#     eval_result:dict[str, Any] = eval_metrics.eval_precision_recall_f1(predictions=retrieved_sent_ids, references=gold_sent_ids)
+#     eval_result.update({'sid': sid})
+#     return eval_result
         
 if __name__ == '__main__':
     

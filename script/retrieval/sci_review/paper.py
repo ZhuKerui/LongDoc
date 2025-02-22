@@ -3,6 +3,7 @@ from .base import *
 import pymupdf
 import re
 import networkx as nx
+import enum
 import itertools
 import string
 import copy
@@ -19,8 +20,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 from langchain_core.documents import Document
-from langchain_community.vectorstores import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
+from transformers import AutoTokenizer
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from openai import OpenAI
 
@@ -48,16 +48,26 @@ NOUN_POS = {NOUN, PROPN, PRON}
 ENT_POS = {NOUN, PROPN}
 PUNCT, DET = 'PUNCT', 'DET'
 
-class DocBlock(BaseModel):
-    text: str
-    i: int = None
-    is_section_header: bool = False
-    bbox: tuple[float, float, float, float] = None
-    phrases_with_hyphen: set[str] = None
-    potential_broken_phrases: set[str] = None
-    lines: list[str] = None
-    line_start_fonts: list[tuple[float, str]] = None
-    
+class ChunkType(enum.Enum):
+    SENTENCE = 'sentence'
+    CHUNK = 'chunk'
+    PARAGRAPH = 'paragraph'
+
+class DocBlock:
+    def __init__(self, text:str, i:int = None, is_section_header:bool = False, bbox:tuple[float, float, float, float] = None, phrases_with_hyphen:set[str] = None, potential_broken_phrases:set[str] = None, lines:list[str] = None, line_start_fonts:list[tuple[float, str]] = None, nlp_local:Doc = None, nlp_global:Span = None, prons:list[Span] = None, pron_root2coref:dict[int, Span] = None):
+        
+        self.text = text
+        self.i = i
+        self.is_section_header = is_section_header
+        self.bbox = bbox
+        self.phrases_with_hyphen = phrases_with_hyphen
+        self.potential_broken_phrases = potential_broken_phrases
+        self.lines = lines
+        self.line_start_fonts = line_start_fonts
+        self.nlp_local = nlp_local
+        self.nlp_global = nlp_global
+        self.prons = prons
+        self.pron_root2coref = pron_root2coref
     
 class OutlineSection:
     def __init__(self, header:str, level:int, section_id:int, blocks:list[DocBlock]=[]):
@@ -65,27 +75,15 @@ class OutlineSection:
         self.level = level
         self.section_id = section_id
         self.blocks = blocks
-        self.merged_blocks:list[Document] = None
         self.next_sibling:OutlineSection = None
         self.prev_sibling:OutlineSection = None
         self.children:list[OutlineSection] = None
         self.parent:OutlineSection = None
         
-        self.section_nlp_global:Span = None
-        self.section_nlp_local:Doc = None
-        
-        self.prons:list[Span] = None
-        self.pron_root2coref:dict[int, Span] = None
-        
-        
     @property
     def text(self):
         return PARAGRAPH_SEP.join([block.text for block in self.blocks])
     
-    @property
-    def text_wo_header(self):
-        return PARAGRAPH_SEP.join([block.text for block in self.blocks[1:]])
-
     @property
     def complete_header(self):
         headers = [self.header]
@@ -97,23 +95,12 @@ class OutlineSection:
     
 
 class DocManager:
-    def __init__(self, tool_llm:str = GPT_MODEL_CHEAP, emb_model:str = DEFAULT_EMB_MODEL, word_vocab:set[str] = None):
+    def __init__(self, tool_llm:str = GPT_MODEL_CHEAP, word_vocab:set[str] = None):
         self.tool_llm = tool_llm
         self.nlp = spacy.load(SPACY_MODEL)
         self.nlp.add_pipe("positionrank")
         self.nlp.add_pipe("fastcoref")
         self.client = OpenAI(api_key=os.environ[OPENAI_API_KEY_VARIABLE])
-        
-        # Load Embeddings
-        self.emb_model_name = emb_model
-        self.model_kwargs = {'device': 'cpu'}
-        self.encode_kwargs = {'normalize_embeddings': False}
-        self.embedding = HuggingFaceEmbeddings(
-            model_name=self.emb_model_name,
-            model_kwargs=self.model_kwargs,
-            encode_kwargs=self.encode_kwargs
-        )
-        
         self.word_vocab = word_vocab or set()
         
     def parse_pdf(self, pdf_file:str):
@@ -145,6 +132,8 @@ class DocManager:
             outline_pass, err_msg, blocks, sections, meta_data = self.parse_outline(outline, blocks, is_from_pdf=True, main_text_style=main_text_style)
         
         blocks, sections = DocManager.reduce_noise(blocks, sections, doc_vocab)
+        DocManager.finalize_sections(sections)
+        assert all(bid == block.i for bid, block in enumerate(blocks)), "Block ids should be in order"
         return blocks, sections, meta_data, DocManager.outline_from_sections(sections), main_text_style, doc_vocab
         
     def load_doc(self, doc_strs:list[str], outline:str, simple_load:bool = False):
@@ -157,6 +146,8 @@ class DocManager:
         outline_pass, err_msg, blocks, sections, meta_data = DocManager.parse_outline(outline, blocks, is_from_pdf=False)
         assert outline_pass, err_msg
         
+        DocManager.finalize_sections(sections)
+        assert all(bid == block.i for bid, block in enumerate(blocks)), "Block ids should be in order"
         self.blocks = blocks
         self.sections = sections
         self.meta_data = meta_data
@@ -192,7 +183,7 @@ class DocManager:
     
     @property
     def sents(self):
-        return [section.section_nlp_global[sent.start:sent.end] for section in self.sections if section.section_nlp_global for sent in section.section_nlp_local.sents]
+        return list(DocManager.iterate_find(self.doc_spacy, [sent.text for block in self.blocks for sent in block.nlp_local.sents]))
 
     def generate_outline(self, blocks:list[DocBlock]):
         print('Generating outline')
@@ -290,12 +281,13 @@ class DocManager:
         
         # Parse outline
         sections = list[OutlineSection]()
+        over_indentation = 0
         for line in outline.splitlines():
             section_header = line.strip().strip('-').strip()
             if not section_header:
                 # Skip empty lines
                 continue
-            current_section = OutlineSection(section_header, (line.index(section_header)-min_indentation) // tab_width, len(sections))
+            current_section = OutlineSection(header=section_header, level=(line.index(section_header)-min_indentation) // tab_width, section_id=len(sections))
             sections.append(current_section)
 
         meta_data = list[DocBlock]()
@@ -322,7 +314,7 @@ class DocManager:
                 
                 startswith_section_header = False
                 if not is_from_pdf:
-                    startswith_section_header = next_section.header == block.text
+                    startswith_section_header = lower_next_header_wo_space == lower_block_wo_space
                 elif lower_block_wo_space.startswith(lower_next_header_wo_space):
                     startswith_section_header = True
                 elif lower_block_wo_space.startswith(lower_next_header_wo_space_num):
@@ -506,14 +498,16 @@ class DocManager:
                 
             section.blocks = new_section_blocks
             new_sections.append(section)
-            
-        for bid, block in enumerate(new_blocks):
-            block.i = bid
-        
-        for sid, section in enumerate(new_sections):
+
+        return new_blocks, new_sections
+    
+    @staticmethod
+    def finalize_sections(sections:list[OutlineSection]):
+        bid = 0
+        for sid, section in enumerate(sections):
             section.children = []
             if sid:
-                last_section = new_sections[sid-1]
+                last_section = sections[sid-1]
                 while section.level < last_section.level:
                     last_section = last_section.parent
                 
@@ -526,34 +520,29 @@ class DocManager:
                 else:
                     last_section.children.append(section)
                     section.parent = last_section
-
-        return new_blocks, new_sections
+            
+            for block in section.blocks:
+                block.i = bid
+                bid += 1
         
     def index_blocks(self, simple_load:bool = False):
         # Finalize the sections and blocks
-        doc_spacy = self.nlp(self.doc_str_wo_headers, disable=['fastcoref'] if not simple_load else ['fastcoref', "lemmatizer", "ner", "positionrank"])
-        tid2section_id = np.ones(len(doc_spacy), dtype=int) * -1
+        doc_spacy = self.nlp(self.doc_str, disable=['fastcoref'] if not simple_load else ['fastcoref', "lemmatizer", "ner", "positionrank"])
+        tid2block_id = np.ones(len(doc_spacy), dtype=int) * -1
         tid2sent_id = np.ones(len(doc_spacy), dtype=int) * -1
         
-        section_contents = list[str]()
-        section_with_content = list[OutlineSection]()
-        for section in self.sections:
-            section_content = PARAGRAPH_SEP.join(block.text for block in section.blocks if not block.is_section_header)
-            if section_content:
-                section_contents.append(section_content)
-                section_with_content.append(section)
-        
-        section_nlp_global:Span
-        for section, section_nlp_global in zip(section_with_content, DocManager.iterate_find(doc_spacy, section_contents)):
-            section.section_nlp_global = section_nlp_global
-            section.section_nlp_local = self.nlp(section_nlp_global.text, disable=["lemmatizer", "ner", "positionrank"] if not simple_load else ['fastcoref', "lemmatizer", "ner", "positionrank"])
-            tid2section_id[section.section_nlp_global.start:section.section_nlp_global.end] = section.section_id
+        nlp_global:Span
+        block:DocBlock
+        for block, nlp_global in zip(self.blocks, DocManager.iterate_find(doc_spacy, [block.text for block in self.blocks])):
+            block.nlp_global = nlp_global
+            tid2block_id[nlp_global.start:nlp_global.end] = block.i
+            block.nlp_local = self.nlp(block.text, disable=["lemmatizer", "ner", "positionrank"] if not simple_load else ['fastcoref', "lemmatizer", "ner", "positionrank"])
             
         for sent_id, sent in enumerate(doc_spacy.sents):
             tid2sent_id[sent.start:sent.end] = sent_id
 
         self.doc_spacy = doc_spacy
-        self.tid2section_id = tid2section_id
+        self.tid2block_id = tid2block_id
         self.tid2sent_id = tid2sent_id
         
     def collect_keyphrases(self):
@@ -604,10 +593,10 @@ class DocManager:
         # Extend the spans to full noun phrases
         extended_spans = set[tuple[int, int]]()
         for span in spans:
-            section = self.get_section_for_span(span)
-            span_local = section.section_nlp_local[span.start-section.section_nlp_global.start:span.end-section.section_nlp_global.start]
+            block = self.get_block_for_span(span)
+            span_local = block.nlp_local[span.start-block.nlp_global.start:span.end-block.nlp_global.start]
             span_local = DocManager.get_full_noun_phrase(span_local)
-            extended_spans.add((span_local.start+section.section_nlp_global.start, span_local.end+section.section_nlp_global.start))
+            extended_spans.add((span_local.start+block.nlp_global.start, span_local.end+block.nlp_global.start))
         
         # Merge the overlapping spans
         extended_spans = list(extended_spans)
@@ -617,13 +606,13 @@ class DocManager:
         
         # Merge phrases based on prep_pobj relation or subj subtree
         for phrase_id, span_range in enumerate(new_span_ranges):
-            curr_section = self.get_section_for_span(self.doc_spacy[span_range[0]:span_range[1]])
-            phrase_local = curr_section.section_nlp_local[span_range[0]-curr_section.section_nlp_global.start: span_range[1]-curr_section.section_nlp_global.start]
-            if phrase_local.root.dep_ == 'pobj' and phrase_local.root.head.dep_ == 'prep' and temp_tid2phrase_id[phrase_local.root.head.head.i+curr_section.section_nlp_global.start] >= 0 and phrase_local.root.head.head.i < phrase_local.root.i:
-                new_span_ranges[phrase_id] = new_span_ranges[temp_tid2phrase_id[phrase_local.root.head.head.i+curr_section.section_nlp_global.start]][0], span_range[1]
+            curr_block = self.get_block_for_span(self.doc_spacy[span_range[0]:span_range[1]])
+            phrase_local = curr_block.nlp_local[span_range[0]-curr_block.nlp_global.start: span_range[1]-curr_block.nlp_global.start]
+            if phrase_local.root.dep_ == 'pobj' and phrase_local.root.head.dep_ == 'prep' and temp_tid2phrase_id[phrase_local.root.head.head.i+curr_block.nlp_global.start] >= 0 and phrase_local.root.head.head.i < phrase_local.root.i:
+                new_span_ranges[phrase_id] = new_span_ranges[temp_tid2phrase_id[phrase_local.root.head.head.i+curr_block.nlp_global.start]][0], span_range[1]
             elif 'subj' in phrase_local.root.dep_:
                 subj_tokens = list(phrase_local.root.subtree)
-                new_span_ranges[phrase_id] = subj_tokens[0].i+curr_section.section_nlp_global.start, subj_tokens[-1].i+curr_section.section_nlp_global.start+1
+                new_span_ranges[phrase_id] = subj_tokens[0].i+curr_block.nlp_global.start, subj_tokens[-1].i+curr_block.nlp_global.start+1
             
         new_span_ranges.sort()
         new_span_ranges = merge_overlapping_spans(new_span_ranges)
@@ -635,32 +624,31 @@ class DocManager:
     def build_dkg(self):
         dkg = nx.MultiDiGraph()
         
-        for section in self.sections:
-            if section.section_nlp_local:
-                section.prons = []
-                section.pron_root2coref = {}
-                for coref_cluster in section.section_nlp_local._.coref_clusters:
-                    last_chunk_id = -1
-                    last_coref:Span = None
-                    for coref_mention in coref_cluster:
-                        mention = section.section_nlp_local.char_span(coref_mention[0], coref_mention[1])
-                        curr_phrase_id = self.tid2phrase_id[mention.root.i+section.section_nlp_global.start]
-                        if curr_phrase_id >= 0:
-                            # If the mention is a noun phrase
-                            if last_chunk_id >= 0 and curr_phrase_id != last_chunk_id:
-                                # dkg.add_edges_from([(last_chunk_id, curr_phrase_id, COREF), (curr_phrase_id, last_chunk_id, COREF)], weight=0)
-                                dkg.add_edge(last_chunk_id, curr_phrase_id, COREF, weight=0)
-                            last_chunk_id = curr_phrase_id
-                            last_coref = mention
-                            
-                        elif mention.root.pos_ in {'VERB', 'AUX'}:
-                            last_coref = mention
-                        else:
-                            # If the mention is a pronoun
-                            section.prons.append(mention)
-                            if last_coref is not None:
-                                section.pron_root2coref[mention.root.i] = last_coref
-        
+        for block in self.blocks:
+            block.prons = []
+            block.pron_root2coref = {}
+            for coref_cluster in block.nlp_local._.coref_clusters:
+                last_chunk_id = -1
+                last_coref:Span = None
+                for coref_mention in coref_cluster:
+                    mention = block.nlp_local.char_span(coref_mention[0], coref_mention[1])
+                    curr_phrase_id = self.tid2phrase_id[mention.root.i+block.nlp_global.start]
+                    if curr_phrase_id >= 0:
+                        # If the mention is a noun phrase
+                        if last_chunk_id >= 0 and curr_phrase_id != last_chunk_id:
+                            # dkg.add_edges_from([(last_chunk_id, curr_phrase_id, COREF), (curr_phrase_id, last_chunk_id, COREF)], weight=0)
+                            dkg.add_edge(last_chunk_id, curr_phrase_id, COREF, weight=0)
+                        last_chunk_id = curr_phrase_id
+                        last_coref = mention
+                        
+                    elif mention.root.pos_ in {'VERB', 'AUX'}:
+                        last_coref = mention
+                    else:
+                        # If the mention is a pronoun
+                        block.prons.append(mention)
+                        if last_coref is not None:
+                            block.pron_root2coref[mention.root.i] = last_coref
+    
         CLAUSE_DEPS = {ADVCL, CCOMP, ACL, XCOMP, RELCL, PCOMP}
         
         # xcomp: open clausal complement, subject is not in the clause by definition
@@ -677,12 +665,12 @@ class DocManager:
         CLAUSE_DEPS_TRANSIST_HEAD_SUBJ = {ADVCL, XCOMP, PCOMP, CCOMP}
         CLAUSE_DEPS_USE_HEAD_SUBJ = CLAUSE_DEPS_TRANSIST_HEAD_SUBJ | {CCOMP}
         
-        def add_subj_obj_edges(dkg:nx.MultiDiGraph, subjs:list[tuple[int, Span]], objs:list[tuple[int, Span]], sent_dep_tree:nx.Graph, section:OutlineSection):
+        def add_subj_obj_edges(dkg:nx.MultiDiGraph, subjs:list[tuple[int, Span]], objs:list[tuple[int, Span]], sent_dep_tree:nx.Graph, block:DocBlock):
             for (subj, subj_root), (obj, obj_root) in itertools.product(subjs, objs):
                 try:
                     if subj_root.sent.start != obj_root.sent.start:
                         continue
-                    path = tuple([path_id + section.section_nlp_global.start for path_id in nx.shortest_path(sent_dep_tree, source=subj_root.root.i, target=obj_root.root.i)[1:-1]])
+                    path = tuple([path_id + block.nlp_global.start for path_id in nx.shortest_path(sent_dep_tree, source=subj_root.root.i, target=obj_root.root.i)[1:-1]])
                 except:
                     # print('')
                     # raise ValueError('No path found')
@@ -691,14 +679,14 @@ class DocManager:
                     dkg.add_edge(subj, obj, key=SUBJ_OBJ, paths=[], weight=1)
                 dkg[subj][obj][SUBJ_OBJ]['paths'].append(path)
                 
-        def get_clause_head_noun_phrase_id(section:OutlineSection, clause_root:int, doc:DocManager, tid2tree_id:dict[int, int], clause_id2subjs:dict[int, list[tuple[int, Span]]]):
-            clause_head_tid = section.section_nlp_local[clause_root].head.i
-            clause_head_root = section.section_nlp_local[clause_head_tid:clause_head_tid+1]
-            clause_head_noun_phrase_id:int = self.tid2phrase_id[clause_head_tid + section.section_nlp_global.start]
+        def get_clause_head_noun_phrase_id(block:DocBlock, clause_root:int, tid2tree_id:dict[int, int], clause_id2subjs:dict[int, list[tuple[int, Span]]]):
+            clause_head_tid = block.nlp_local[clause_root].head.i
+            clause_head_root = block.nlp_local[clause_head_tid:clause_head_tid+1]
+            clause_head_noun_phrase_id:int = self.tid2phrase_id[clause_head_tid + block.nlp_global.start]
             if clause_head_noun_phrase_id < 0:
-                coref = section.pron_root2coref.get(clause_head_tid, None)
+                coref = block.pron_root2coref.get(clause_head_tid, None)
                 if coref is not None:
-                    coref_phrase_id = self.tid2phrase_id[section.section_nlp_global.start + coref.root.i]
+                    coref_phrase_id = self.tid2phrase_id[block.nlp_global.start + coref.root.i]
                     if coref_phrase_id >= 0:
                         clause_head_noun_phrase_id = coref_phrase_id
                     else:
@@ -706,10 +694,7 @@ class DocManager:
                         return [(subj, clause_head_root) for subj, subj_root in clause_id2subjs[clause_id]]
             return [(clause_head_noun_phrase_id, clause_head_root)]
         
-        for section in self.sections:
-            if not section.section_nlp_local:
-                continue
-        
+        for block in self.blocks:
             last_subjs, last_sent_start = set[int](), -1
             dep_trees = list[nx.DiGraph]()
             tid2tree_id = dict[int, int]()
@@ -717,7 +702,7 @@ class DocManager:
             clause_id2objs = defaultdict(list[tuple[int, Span]])
             root2clause_roots = defaultdict(list[int])
             
-            for sent in section.section_nlp_local.sents:
+            for sent in block.nlp_local.sents:
                 prev_clause_num = len(dep_trees)
                 sent_dep_tree = nx.Graph()
                 roots = [sent.root]
@@ -733,7 +718,7 @@ class DocManager:
                         token = tokens.pop()
                         for child in token.children:
                             sent_dep_tree.add_edge(token.i, child.i)
-                            if child.dep_ in CLAUSE_DEPS and self.tid2phrase_id[child.i + section.section_nlp_global.start] < 0:
+                            if child.dep_ in CLAUSE_DEPS and self.tid2phrase_id[child.i + block.nlp_global.start] < 0:
                                 roots.append(child)
                                 # root2head_id[child.i] = token.i
                                 root2clause_roots[root.i].append(child.i)
@@ -751,33 +736,33 @@ class DocManager:
                     dep_tree = dep_trees[clause_id]
                     # Find the noun phrases
                     noun_phrases = list[Span]()
-                    phrase_ids = {self.tid2phrase_id[section.section_nlp_global.start + node] for node in dep_tree.nodes}
+                    phrase_ids = {self.tid2phrase_id[block.nlp_global.start + node] for node in dep_tree.nodes}
                     for phrase_id in phrase_ids:
                         if phrase_id >= 0:
                             noun_phrase = self.phrases[phrase_id]
-                            noun_phrases.append(section.section_nlp_local[noun_phrase.start-section.section_nlp_global.start: noun_phrase.end-section.section_nlp_global.start])
+                            noun_phrases.append(block.nlp_local[noun_phrase.start-block.nlp_global.start: noun_phrase.end-block.nlp_global.start])
                     
-                    for np_label, noun_phrase in [('np', np) for np in noun_phrases] + [('p', pron) for pron in section.prons if dep_tree.has_node(pron.root.i)]:
+                    for np_label, noun_phrase in [('np', np) for np in noun_phrases] + [('p', pron) for pron in block.prons if dep_tree.has_node(pron.root.i)]:
                         root_phrase = noun_phrase
 
                         while root_phrase.root.dep_ in {'conj', 'appos'}:
-                            root_phrase_id:int = self.tid2phrase_id[section.section_nlp_global.start + root_phrase.root.head.i]
+                            root_phrase_id:int = self.tid2phrase_id[block.nlp_global.start + root_phrase.root.head.i]
                             if root_phrase_id < 0:
                                 if root_phrase.root.head.pos_ in NOUN_POS:
-                                    root_phrase = section.section_nlp_local[root_phrase.root.head.i: root_phrase.root.head.i+1]
+                                    root_phrase = block.nlp_local[root_phrase.root.head.i: root_phrase.root.head.i+1]
                                 else:
                                     break
                             else:
                                 root_phrase_global = self.phrases[root_phrase_id]
-                                root_phrase = section.section_nlp_local[root_phrase_global.start-section.section_nlp_global.start: root_phrase_global.end-section.section_nlp_global.start]
+                                root_phrase = block.nlp_local[root_phrase_global.start-block.nlp_global.start: root_phrase_global.end-block.nlp_global.start]
                         
                         global_phrase_ids = []
                         if np_label == 'np':
-                            global_phrase_ids.append(self.tid2phrase_id[section.section_nlp_global.start + noun_phrase.root.i])
+                            global_phrase_ids.append(self.tid2phrase_id[block.nlp_global.start + noun_phrase.root.i])
                         else:
-                            if noun_phrase.root.i in section.pron_root2coref:
-                                coref = section.pron_root2coref[noun_phrase.root.i]
-                                coref_phrase_id = self.tid2phrase_id[section.section_nlp_global.start + coref.root.i]
+                            if noun_phrase.root.i in block.pron_root2coref:
+                                coref = block.pron_root2coref[noun_phrase.root.i]
+                                coref_phrase_id = self.tid2phrase_id[block.nlp_global.start + coref.root.i]
                                 if coref_phrase_id >= 0:
                                     global_phrase_ids.append(coref_phrase_id)
                                 else:
@@ -793,12 +778,12 @@ class DocManager:
                         else:
                             clause_id2objs[clause_id].extend((global_phrase_id, root_phrase) for global_phrase_id in global_phrase_ids)
 
-                    add_subj_obj_edges(dkg, clause_id2subjs[clause_id], clause_id2objs[clause_id], sent_dep_tree, section)
+                    add_subj_obj_edges(dkg, clause_id2subjs[clause_id], clause_id2objs[clause_id], sent_dep_tree, block)
                         # for last_subj in last_subjs:
                         #     if dkg.has_edge(last_subj, obj, key=ADJACENT):
-                        #         dkg[last_subj][obj][ADJACENT]['sent_range'].append((last_sent_start + section.section_nlp_global.start, sent.end + section.section_nlp_global.start))
+                        #         dkg[last_subj][obj][ADJACENT]['sent_range'].append((last_sent_start + block.nlp_global.start, sent.end + block.nlp_global.start))
                         #     else:
-                        #         dkg.add_edge(last_subj, obj, key=ADJACENT, sent_range=[(last_sent_start + section.section_nlp_global.start, sent.end + section.section_nlp_global.start)], weight=2)
+                        #         dkg.add_edge(last_subj, obj, key=ADJACENT, sent_range=[(last_sent_start + block.nlp_global.start, sent.end + block.nlp_global.start)], weight=2)
                         
                 # Collect cross-clause edges
                 for clause_id in range(prev_clause_num, len(dep_trees)):
@@ -807,21 +792,21 @@ class DocManager:
                         sub_clause_id = tid2tree_id[sub_clause_root]
                         
                         # Add subj-obj edges between clauses
-                        if section.section_nlp_local[sub_clause_root].dep_ in CLAUSE_DEPS_USE_HEAD_SUBJ:
+                        if block.nlp_local[sub_clause_root].dep_ in CLAUSE_DEPS_USE_HEAD_SUBJ:
                             # Get subjects
                             temp_subjs = clause_id2subjs[clause_id]
                             # Get objects
                             temp_objs = clause_id2subjs[sub_clause_id] + clause_id2objs[sub_clause_id]
                             # Add edges
-                            add_subj_obj_edges(dkg, temp_subjs, temp_objs, sent_dep_tree, section)
+                            add_subj_obj_edges(dkg, temp_subjs, temp_objs, sent_dep_tree, block)
                             # Update subjects if necessary
-                            if not clause_id2subjs[sub_clause_id] and section.section_nlp_local[sub_clause_root].dep_ in CLAUSE_DEPS_TRANSIST_HEAD_SUBJ:
+                            if not clause_id2subjs[sub_clause_id] and block.nlp_local[sub_clause_root].dep_ in CLAUSE_DEPS_TRANSIST_HEAD_SUBJ:
                                 clause_id2subjs[sub_clause_id] = clause_id2subjs[clause_id]
                             
-                        elif section.section_nlp_local[sub_clause_root].dep_ == ACL:
+                        elif block.nlp_local[sub_clause_root].dep_ == ACL:
                             head_noun_phrases = [
                                 (clause_head_noun_phrase_id, head_noun_phrase) 
-                                for clause_head_noun_phrase_id, head_noun_phrase in get_clause_head_noun_phrase_id(section, sub_clause_root, self, tid2tree_id, clause_id2subjs)
+                                for clause_head_noun_phrase_id, head_noun_phrase in get_clause_head_noun_phrase_id(block, sub_clause_root, tid2tree_id, clause_id2subjs)
                                 if clause_head_noun_phrase_id >= 0
                             ]
                             if not head_noun_phrases:
@@ -832,27 +817,27 @@ class DocManager:
                             # Get objects
                             temp_objs = clause_id2subjs[sub_clause_id] + clause_id2objs[sub_clause_id]
                             # Add edges
-                            add_subj_obj_edges(dkg, temp_subjs, temp_objs, sent_dep_tree, section)
+                            add_subj_obj_edges(dkg, temp_subjs, temp_objs, sent_dep_tree, block)
                             # Update subjects if necessary
                             if not clause_id2subjs[sub_clause_id]:
                                 clause_id2subjs[sub_clause_id] = head_noun_phrases
                         
-                        # elif section.section_nlp_local[sub_clause_root].dep_ == XCOMP:
+                        # elif block.nlp_local[sub_clause_root].dep_ == XCOMP:
                         #     for (subj, subj_root), (obj, obj_root) in itertools.product(clause_id2subjs[clause_id], clause_id2subjs[sub_clause_id] + clause_id2objs[sub_clause_id]):
-                        #         path = tuple([path_id + section.section_nlp_global.start for path_id in nx.shortest_path(sent_dep_tree, source=subj_root.root.i, target=obj_root.root.i)[1:-1]])
+                        #         path = tuple([path_id + block.nlp_global.start for path_id in nx.shortest_path(sent_dep_tree, source=subj_root.root.i, target=obj_root.root.i)[1:-1]])
                         #         if not dkg.has_edge(subj, obj, key=SUBJ_OBJ):
                         #             dkg.add_edge(subj, obj, key=SUBJ_OBJ, paths=[], weight=1)
                         #         dkg[subj][obj][SUBJ_OBJ]['paths'].append(path)
                         #     for (subj, subj_root), (obj, obj_root) in itertools.product(clause_id2objs[clause_id], clause_id2subjs[sub_clause_id] + clause_id2objs[sub_clause_id]):
-                        #         path = tuple([path_id + section.section_nlp_global.start for path_id in range(subj_root.root.i+1, obj_root.root.i)])
+                        #         path = tuple([path_id + block.nlp_global.start for path_id in range(subj_root.root.i+1, obj_root.root.i)])
                         #         if not dkg.has_edge(subj, obj, key=SUBJ_OBJ):
                         #             dkg.add_edge(subj, obj, key=SUBJ_OBJ, paths=[], weight=1)
                         #         dkg[subj][obj][SUBJ_OBJ]['paths'].append(path)
                         
-                        elif section.section_nlp_local[sub_clause_root].dep_ == RELCL:
+                        elif block.nlp_local[sub_clause_root].dep_ == RELCL:
                             head_noun_phrases = [
                                 (clause_head_noun_phrase_id, head_noun_phrase) 
-                                for clause_head_noun_phrase_id, head_noun_phrase in get_clause_head_noun_phrase_id(section, sub_clause_root, self, tid2tree_id, clause_id2subjs)
+                                for clause_head_noun_phrase_id, head_noun_phrase in get_clause_head_noun_phrase_id(block, sub_clause_root, tid2tree_id, clause_id2subjs)
                                 if clause_head_noun_phrase_id >= 0
                             ]
                             if not head_noun_phrases:
@@ -864,7 +849,7 @@ class DocManager:
                                 # Get objects
                                 temp_objs = clause_id2objs[sub_clause_id]
                                 # Add edges
-                                add_subj_obj_edges(dkg, temp_subjs, temp_objs, sent_dep_tree, section)
+                                add_subj_obj_edges(dkg, temp_subjs, temp_objs, sent_dep_tree, block)
                                 # Update subjects if necessary
                                 clause_id2subjs[sub_clause_id] = head_noun_phrases
                                 
@@ -874,11 +859,11 @@ class DocManager:
                                 # Get objects
                                 temp_objs = head_noun_phrases
                                 # Add edges
-                                add_subj_obj_edges(dkg, temp_subjs, temp_objs, sent_dep_tree, section)
+                                add_subj_obj_edges(dkg, temp_subjs, temp_objs, sent_dep_tree, block)
                                 
                         
-                        # elif section.section_nlp_local[sub_clause_root].dep_ == PCOMP:
-                        #     clause_head = section.section_nlp_local[sub_clause_root].head
+                        # elif block.nlp_local[sub_clause_root].dep_ == PCOMP:
+                        #     clause_head = block.nlp_local[sub_clause_root].head
                         #     while clause_head.pos_ not in NOUN_POS:
                         #         new_clause_head = clause_head.head
                         #         if new_clause_head == clause_head:
@@ -887,18 +872,18 @@ class DocManager:
                         #     if clause_head.pos_ not in NOUN_POS:
                         #         continue
                         #     clause_head_tid = clause_head.i
-                        #     clause_head_noun_phrase_id = self.tid2phrase_id[clause_head_tid + section.section_nlp_global.start]
+                        #     clause_head_noun_phrase_id = self.tid2phrase_id[clause_head_tid + block.nlp_global.start]
                         #     if clause_head_noun_phrase_id < 0:
-                        #         if clause_head_tid in section.pron_root2coref:
-                        #                 coref = section.pron_root2coref[clause_head_tid]
-                        #                 coref_phrase_id = self.tid2phrase_id[section.section_nlp_global.start + coref.root.i]
+                        #         if clause_head_tid in block.pron_root2coref:
+                        #                 coref = block.pron_root2coref[clause_head_tid]
+                        #                 coref_phrase_id = self.tid2phrase_id[block.nlp_global.start + coref.root.i]
                         #                 if coref_phrase_id >= 0:
                         #                     clause_head_noun_phrase_id = coref_phrase_id
                                             
                         #     if clause_head_noun_phrase_id < 0:
                         #         continue
                         #     for (obj, obj_root) in clause_id2subjs[sub_clause_id] + clause_id2objs[sub_clause_id]:
-                        #         path = tuple([path_id + section.section_nlp_global.start for path_id in nx.shortest_path(sent_dep_tree, source=clause_head_tid, target=obj_root.root.i)[1:-1]])
+                        #         path = tuple([path_id + block.nlp_global.start for path_id in nx.shortest_path(sent_dep_tree, source=clause_head_tid, target=obj_root.root.i)[1:-1]])
                         #         if not dkg.has_edge(clause_head_noun_phrase_id, obj, key=SUBJ_OBJ):
                         #             dkg.add_edge(clause_head_noun_phrase_id, obj, key=SUBJ_OBJ, paths=[], weight=1)
                         #         dkg[clause_head_noun_phrase_id][obj][SUBJ_OBJ]['paths'].append(path)
@@ -1018,40 +1003,37 @@ class DocManager:
 
         self.dkg = dkg
     
-    def build_chunks(self, sent_chunk:bool = False, max_seq_length:int = None):
+    def build_chunks(self, chunk_type:ChunkType, max_seq_length:int = None, tokenizer:AutoTokenizer = None):
         cid = 0
         self.tid2chunk_id = np.ones(len(self.doc_spacy), dtype=int) * -1
         self.chunks = list[Document]()
         
-        if not sent_chunk:
-            # Load text splitter
-            
+        if chunk_type == ChunkType.CHUNK:
             text_splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
-                tokenizer=self.embedding._client.tokenizer,
-                chunk_size=min(max_seq_length or self.embedding._client.get_max_seq_length(), self.embedding._client.get_max_seq_length()), 
+                tokenizer=tokenizer,
+                chunk_size=max_seq_length, 
                 chunk_overlap=0,
                 separators=["\n\n", ". ", ", ", " ", ""],
                 keep_separator='end'
             )
         
-        for section in self.sections:
-            section.merged_blocks = []
-            if section.section_nlp_global:
-                chunks = [section.section_nlp_global[chunk.start:chunk.end] for chunk in section.section_nlp_local.sents] if sent_chunk else DocManager.iterate_find(section.section_nlp_global, text_splitter.split_text(section.section_nlp_global.text))
-                for chunk in chunks:
-                    new_chunk = Document(chunk.text, metadata={'start_idx': chunk[0].idx, 'chunk_id': cid})
-                    section.merged_blocks.append(new_chunk)
-                    self.chunks.append(new_chunk)
-                    self.tid2chunk_id[chunk.start:chunk.end] = cid
-                    cid += 1
+        for block in self.blocks:
+            match chunk_type:
+                case ChunkType.SENTENCE:
+                    chunks = DocManager.iterate_find(block.nlp_global, [sent.text.strip() for sent in block.nlp_local.sents])
+                case ChunkType.PARAGRAPH:
+                    chunks = [block.nlp_global]
+                case ChunkType.CHUNK:
+                    chunks = DocManager.iterate_find(block.nlp_global, text_splitter.split_text(block.nlp_global.text))
+            for chunk in chunks:
+                new_chunk = Document(chunk.text, metadata={'start_idx': chunk[0].idx, 'chunk_id': cid})
+                self.chunks.append(new_chunk)
+                self.tid2chunk_id[chunk.start:chunk.end] = cid
+                cid += 1
         
-        if self.phrases:
+        if hasattr(self, 'phrases'):
             self.pid2chunk_ids = {pid: set(self.tid2chunk_id[phrase.start:phrase.end]) for pid, phrase in enumerate(self.phrases)}
         
-        if hasattr(self, 'vectorstore'):
-            self.vectorstore.delete_collection()
-            del self.vectorstore
-        self.vectorstore = Chroma.from_documents(documents=self.chunks, embedding=self.embedding)
                     
     
     # =========================== Doc Helper Functions ===========================
@@ -1295,10 +1277,10 @@ class DocManager:
             start_idx = end_idx
     # --------------------------- Self-Defined Structure Related Functions ---------------------------
     
-    @staticmethod
-    def get_chunks_from_section(section:OutlineSection):
+    def get_chunks_from_section(self, section:OutlineSection):
         passages = list[Document]()
-        passages.extend(section.merged_blocks)
+        for block in section.blocks:
+            passages.extend(self.chunks[chunk_id] for chunk_id in sorted({cid for cid in self.tid2chunk_id[block.nlp_global.start:block.nlp_global.end] if cid >= 0}))
         for child in section.children:
             passages.extend(DocManager.get_chunks_from_section(child))
         return passages
@@ -1336,41 +1318,41 @@ class DocManager:
                     if sw_map[:, idx].any() and sw_map[:, idx + width].any() and sw_map[:, idx:idx+width+1].sum(1).all():
                         yield self.sections[idx:idx+width+1]
             
-    def get_section_for_span(self, span:Span) -> OutlineSection | None:
-        if self.tid2section_id[span.start] >= 0 and self.tid2section_id[span.end-1] >= 0 and self.tid2section_id[span.start] == self.tid2section_id[span.end-1]:
-            return self.sections[self.tid2section_id[span.start]]
+    def get_block_for_span(self, span:Span) -> DocBlock | None:
+        if self.tid2block_id[span.start] >= 0 and self.tid2block_id[span.end-1] >= 0 and self.tid2block_id[span.start] == self.tid2block_id[span.end-1]:
+            return self.blocks[self.tid2block_id[span.start]]
         
     def plot_dkg(self):
         y_start = 0
         width = 80
         nodes = []
-        for section in self.sections:
-            if section.section_nlp_local:
+        for block in self.blocks:
+            if block.nlp_local:
                 # start_idx = 0
-                for sent in section.section_nlp_local.sents:
+                for sent in block.nlp_local.sents:
                     start_idx = sent[0].idx
-                    last_chunk_tid = sent.start + section.section_nlp_global.start
+                    last_chunk_tid = sent.start + block.nlp_global.start
                     last_chunk_id = self.tid2phrase_id[last_chunk_tid]
                     curr_chunk_tid = last_chunk_tid
                     curr_chunk_id = last_chunk_id
                     for token in sent[1:]:
-                        curr_chunk_tid = token.i + section.section_nlp_global.start
+                        curr_chunk_tid = token.i + block.nlp_global.start
                         curr_chunk_id = self.tid2phrase_id[curr_chunk_tid]
                         if curr_chunk_id != last_chunk_id:
-                            dist2start = self.doc_spacy[last_chunk_tid].idx - section.section_nlp_global[0].idx - start_idx
+                            dist2start = self.doc_spacy[last_chunk_tid].idx - block.nlp_global[0].idx - start_idx
                             if dist2start > width:
                                 y_start += 20
-                                start_idx = self.doc_spacy[last_chunk_tid].idx - section.section_nlp_global[0].idx
+                                start_idx = self.doc_spacy[last_chunk_tid].idx - block.nlp_global[0].idx
                                 dist2start = 0
                             nodes.append({'data': {'id': last_chunk_tid, 'label': self.doc_spacy[last_chunk_tid:curr_chunk_tid].text}, 'position': {'x': dist2start * 6.1, 'y': y_start}, 'classes': 'noun_phrase' if last_chunk_id >= 0 else 'text', 'locked': True})
                             last_chunk_tid = curr_chunk_tid
                             last_chunk_id = curr_chunk_id
-                    dist2start = self.doc_spacy[last_chunk_tid].idx - section.section_nlp_global[0].idx - start_idx
+                    dist2start = self.doc_spacy[last_chunk_tid].idx - block.nlp_global[0].idx - start_idx
                     if dist2start > width:
                         y_start += 20
-                        start_idx = self.doc_spacy[last_chunk_tid].idx - section.section_nlp_global[0].idx
+                        start_idx = self.doc_spacy[last_chunk_tid].idx - block.nlp_global[0].idx
                         dist2start = 0
-                    nodes.append({'data': {'id': last_chunk_tid, 'label': self.doc_spacy[last_chunk_tid:sent.end+section.section_nlp_global.start].text}, 'position': {'x': dist2start * 6.1, 'y': y_start}, 'classes': 'noun_phrase' if last_chunk_id >= 0 else 'text', 'locked': True})
+                    nodes.append({'data': {'id': last_chunk_tid, 'label': self.doc_spacy[last_chunk_tid:sent.end+block.nlp_global.start].text}, 'position': {'x': dist2start * 6.1, 'y': y_start}, 'classes': 'noun_phrase' if last_chunk_id >= 0 else 'text', 'locked': True})
                     y_start += 50
                 y_start += 100
                 

@@ -8,6 +8,7 @@ from langchain import hub
 from typing import Type, Optional, Annotated
 from enum import Enum
 from langchain.tools.retriever import create_retriever_tool
+from langchain_core.retrievers import BaseRetriever
 from langchain_community.retrievers import BM25Retriever
 from langgraph.prebuilt import InjectedState
 from langchain_openai import ChatOpenAI
@@ -151,17 +152,17 @@ class RetrieveByGroupedCtrlF(BaseTool):
 #             This function is useful for retrieving sections of a document that are relevant to specific search criteria, while allowing flexibility in defining where and how the search should be conducted.'''
 #         )
     
-def RetrieveByBM25Retrieval(doc_manager: DocManager, k: int = 4):
+def RetrieveByBM25Retrieval(chunks:list[str], k: int = 4):
     return create_retriever_tool(
-        retriever=BM25Retriever.from_documents(doc_manager.chunks, k=k), 
+        retriever=BM25Retriever.from_documents(chunks, k=k), 
         name='Retrieve_By_BM25_Retrieval', 
         description='Retrieve the most relevant paragraph from the paper based on a given query using BM25 retrieval.', 
         response_format='content',
         document_separator=CHUNK_SEP)
             
-def RetrieveByDenseRetrieval(doc_manager: DocManager, k: int = 4):
+def RetrieveByDenseRetrieval(retriever:BaseRetriever):
     return create_retriever_tool(
-        retriever=doc_manager.vectorstore.as_retriever(search_kwargs={'k': k}), 
+        retriever=retriever,
         name='Retrieve_By_Dense_Retrieval', 
         description='Retrieve the most relevant paragraph from the paper based on a given query using dense retrieval.', 
         response_format='content',

@@ -1,32 +1,31 @@
 from .pipeline_base import *
 
-from typing import List, Literal
-
 from langgraph.prebuilt import tools_condition, ToolNode
 from langgraph.prebuilt.chat_agent_executor import AgentState
 
 
 class AgenticRAG(MyPipeline):
     
-    AGENT = "agent"
     TOOLS = "tools"
     TOOL_POST_PROCESS = "tool_post_process"
     
-    MESSAGES = "messages"
     PASSAGES = "passages"
     QUESTION = "question"
     RETRIEVAL = "retrieval"
+    CHUNKS = "chunks"
     
     class AgenticRAGState(AgentState):
-        passages: List[str]
+        passages: list[int]
         question: str
-        retrieval: List[str]
+        retrieval: list[int]
+        chunks: list[str]
     
     def __init__(self, enable_trace = False, project_name = None, llm_model = GPT_MODEL_CHEAP):
         super().__init__(enable_trace, project_name, llm_model)
         
         
-    def load_langgraph(self, tools:List[BaseTool] = []):
+    def load_langgraph(self, tools:list[BaseTool]):
+        assert tools, "No tools provided"
         
         self.tools = tools
         
@@ -37,39 +36,37 @@ class AgenticRAG(MyPipeline):
         workflow.add_node(self.AGENT, self.agent)
         workflow.add_edge(START, self.AGENT)
         
-        if self.tools:
-            workflow.add_node(self.TOOLS, ToolNode(self.tools))
-            workflow.add_node(self.TOOL_POST_PROCESS, self.tool_post_process)
+        workflow.add_node(self.TOOLS, ToolNode(self.tools))
+        workflow.add_node(self.TOOL_POST_PROCESS, self.tool_post_process)
 
-            # Decide whether to retrieve
-            workflow.add_conditional_edges(
-                self.AGENT,
-                # Assess agent decision
-                tools_condition,
-                {
-                    # Translate the condition outputs to nodes in our graph
-                    "tools": self.TOOLS,
-                    END: END,
-                },
-            )
+        # Decide whether to retrieve
+        workflow.add_conditional_edges(
+            self.AGENT,
+            # Assess agent decision
+            tools_condition,
+            {
+                # Translate the condition outputs to nodes in our graph
+                "tools": self.TOOLS,
+                END: END,
+            },
+        )
 
-            workflow.add_edge(self.TOOLS, self.TOOL_POST_PROCESS)
-            workflow.add_edge(self.TOOL_POST_PROCESS, self.AGENT)
-        else:
-            workflow.add_edge(self.AGENT, END)
+        workflow.add_edge(self.TOOLS, self.TOOL_POST_PROCESS)
+        workflow.add_edge(self.TOOL_POST_PROCESS, self.AGENT)
 
         # Compile
         self.app = workflow.compile()
         
         
-    def invoke(self, question:str):
+    def invoke(self, question:str, chunks:list[str]):
 
         # Run
         inputs = {
             self.MESSAGES: [("user", question)],
             self.PASSAGES: [],
             self.QUESTION: question,
-            self.RETRIEVAL: []
+            self.RETRIEVAL: [],
+            self.CHUNKS: chunks
         }
         
         return list(self.app.stream(inputs, output_keys=[self.MESSAGES, self.PASSAGES, self.RETRIEVAL]))
@@ -87,15 +84,12 @@ class AgenticRAG(MyPipeline):
             dict: The updated state with the agent response appended to messages
         """
         print("---CALL AGENT---")
-        messages:List[BaseMessage] = state["messages"]
+        messages:list[BaseMessage] = state[self.MESSAGES]
         
-        if self.tools:
-            model = self.llm.bind_tools(self.tools)
-        else:
-            model = self.llm
+        model = self.llm.bind_tools(self.tools)
         response = model.invoke(messages)
         # We return a list, because this will get added to the existing list
-        return {"messages": [response]}
+        return {self.MESSAGES: [response]}
 
 
     def tool_post_process(self, state):
@@ -109,16 +103,16 @@ class AgenticRAG(MyPipeline):
             str: A decision for whether the documents are relevant or not
         """
 
-        passages:List[str] = state["passages"]
-        question:str = state["question"]
-        new_passages:List[str] = []
-        new_retrieval:List[str] = []
+        passages:list[int] = state[self.PASSAGES]
+        question:str = state[self.QUESTION]
+        chunks:list[str] = state[self.CHUNKS]
+        retrieval = list[int]()
         retrieval_called = False
         
         tool_messages = list[ToolMessage]()
         ai_message:AIMessage = None
         
-        for message in state["messages"][::-1]:
+        for message in state[self.MESSAGES][::-1]:
             if isinstance(message, ToolMessage):
                 tool_messages.insert(0, message)
             elif isinstance(message, AIMessage):
@@ -133,28 +127,24 @@ class AgenticRAG(MyPipeline):
             if tool_message.name.startswith("Retrieve"):
                 retrieval_called = True
                 print("---CHECK RELEVANCE---")
-                retrieval = tool_message.content.split(CHUNK_SEP)
-                new_retrieval.extend(f"{tool_call['args']['query']}{CHUNK_SEP}{doc}" for doc in retrieval)
-                new_docs = [doc for doc in retrieval if doc not in passages]
+                temp_retrieval = [chunks.index(chunk) for chunk in tool_message.content.split(CHUNK_SEP)]
+                retrieval.extend(temp_retrieval)
+                new_doc_ids = [doc_id for doc_id in temp_retrieval if doc_id not in passages]
                 
-                if new_docs:
-                    # Sanity check
-                    chunk_set = {chunk.page_content for chunk in self.doc_manager.chunks}
-                    assert all(doc in chunk_set for doc in new_docs)
+                if new_doc_ids:
                     
                     # Chain
                     chain = grade_doc_prompt | self.llm.with_structured_output(grade_doc_data)
                 
-                    # scored_results:List[grade_doc_data] = chain.batch([{"question": tool_call['args']['query'], "context": doc} for doc in new_docs])
-                    scored_results:List[grade_doc_data] = chain.batch([{"question": question, "context": doc} for doc in new_docs])
+                    scored_results:list[grade_doc_data] = chain.batch([{"question": question, "context": chunks[doc_id]} for doc_id in new_doc_ids])
 
-                    new_relevant_docs = [doc for doc, scored_result in zip(new_docs, scored_results) if scored_result.binary_score == "yes"]
+                    new_relevant_doc_ids = [doc_id for doc_id, scored_result in zip(new_doc_ids, scored_results) if scored_result.binary_score == "yes"]
                 
-                    new_passages.extend(new_relevant_docs)
+                    passages.extend(new_relevant_doc_ids)
 
-                    if new_relevant_docs:
+                    if new_relevant_doc_ids:
                         print("---NEW RELEVANT DOCS---")
-                        tool_message.content = 'New relevant documents are retrieved.\n\n' + PARAGRAPH_SEP.join(new_relevant_docs)
+                        tool_message.content = 'New relevant documents are retrieved.\n\n' + PARAGRAPH_SEP.join(chunks[doc_id] for doc_id in new_relevant_doc_ids)
 
                     else:
                         print("---DECISION: DOCS NOT RELEVANT---")
@@ -164,8 +154,7 @@ class AgenticRAG(MyPipeline):
                     tool_message.content = "Retrieved documents are already in previous steps. No new documents retrieved."
         
         if retrieval_called:
-            passages.extend(new_passages)
-            return {self.PASSAGES: passages, self.RETRIEVAL: new_retrieval}
+            return {self.PASSAGES: passages, self.RETRIEVAL: retrieval}
         
         
     @staticmethod
@@ -175,9 +164,9 @@ class AgenticRAG(MyPipeline):
             os.makedirs(dir)
         for a in process:
             for k, v in a.items():
-                if k in {AgenticRAG.AGENT, AgenticRAG.TOOLS}:
-                    for mid in range(len(v['messages'])):
-                        v['messages'][mid] = v['messages'][mid].model_dump()
+                if k in {MyPipeline.AGENT, AgenticRAG.TOOLS}:
+                    for mid in range(len(v[MyPipeline.MESSAGES])):
+                        v[MyPipeline.MESSAGES][mid] = v[MyPipeline.MESSAGES][mid].model_dump()
         with open(dump_file, 'w') as f:
             json.dump(process, f)
             
@@ -188,8 +177,25 @@ class AgenticRAG(MyPipeline):
             process = json.load(f)
         for a in process:
             for k, v in a.items():
-                if k == AgenticRAG.AGENT:
-                    v['messages'][0] = AIMessage(**(v['messages'][0]))
+                if k == MyPipeline.AGENT:
+                    v[MyPipeline.MESSAGES][0] = AIMessage(**(v[MyPipeline.MESSAGES][0]))
                 elif k == AgenticRAG.TOOLS:
-                    v['messages'][0] = ToolMessage(**(v['messages'][0]))
+                    v[MyPipeline.MESSAGES][0] = ToolMessage(**(v[MyPipeline.MESSAGES][0]))
         return process
+    
+    @staticmethod
+    def get_chunk_ids_from_process(
+        process:list[dict],
+        relevant_only:bool=True
+    ) -> list[int]:
+        if relevant_only:
+            for step in process[::-1]:
+                if AgenticRAG.TOOL_POST_PROCESS in step and step[AgenticRAG.TOOL_POST_PROCESS]:
+                    return step[AgenticRAG.TOOL_POST_PROCESS][AgenticRAG.PASSAGES]
+        else:
+            chunk_ids = list[int]()
+            for step in process:
+                if AgenticRAG.TOOL_POST_PROCESS in step and step[AgenticRAG.TOOL_POST_PROCESS]:
+                    chunk_ids.extend(step[AgenticRAG.TOOL_POST_PROCESS][AgenticRAG.RETRIEVAL])
+            return list(set(chunk_ids))
+            
