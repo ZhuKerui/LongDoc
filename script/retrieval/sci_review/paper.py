@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from time import sleep
 
 import spacy
-from spacy.tokens import Span, Doc
+from spacy.tokens import Span, Doc, Token
 from spacy.lang.en import stop_words
 import pytextrank
 from pytextrank import Phrase
@@ -532,17 +532,17 @@ class DocManager:
         tid2sent_id = np.ones(len(doc_spacy), dtype=int) * -1
         
         nlp_global:Span
+        nlp_local:Doc
         block:DocBlock
-        for block, nlp_global in zip(self.blocks, DocManager.iterate_find(doc_spacy, [block.text for block in self.blocks])):
+        for block, nlp_global, nlp_local in zip(self.blocks, DocManager.iterate_find(doc_spacy, [block.text for block in self.blocks]), self.nlp.pipe([block.text for block in self.blocks], disable=["lemmatizer", "ner", "positionrank"] if not simple_load else ['fastcoref', "lemmatizer", "ner", "positionrank"])):
             block.nlp_global = nlp_global
             tid2block_id[nlp_global.start:nlp_global.end] = block.i
-            block.nlp_local = self.nlp(block.text, disable=["lemmatizer", "ner", "positionrank"] if not simple_load else ['fastcoref', "lemmatizer", "ner", "positionrank"])
-            
-        for sent_id, sent in enumerate(doc_spacy.sents):
-            tid2sent_id[sent.start:sent.end] = sent_id
+            block.nlp_local = nlp_local
 
         self.doc_spacy = doc_spacy
         self.tid2block_id = tid2block_id
+        for sent_id, sent in enumerate(self.sents):
+            tid2sent_id[sent.start:sent.end] = sent_id
         self.tid2sent_id = tid2sent_id
         
     def collect_keyphrases(self):
@@ -612,17 +612,28 @@ class DocManager:
                 new_span_ranges[phrase_id] = new_span_ranges[temp_tid2phrase_id[phrase_local.root.head.head.i+curr_block.nlp_global.start]][0], span_range[1]
             elif 'subj' in phrase_local.root.dep_:
                 subj_tokens = list(phrase_local.root.subtree)
-                new_span_ranges[phrase_id] = subj_tokens[0].i+curr_block.nlp_global.start, subj_tokens[-1].i+curr_block.nlp_global.start+1
+                root_span = False
+                temp_span_range = list[Token]()
+                last_id:int = -1
+                for token in subj_tokens:
+                    if token.i == phrase_local.root.i:
+                        root_span = True
+                    if temp_span_range and token.i != last_id + 1:
+                        if root_span:
+                            break
+                        temp_span_range.clear()
+                    temp_span_range.append(token)
+                    last_id = token.i
+                new_span_ranges[phrase_id] = temp_span_range[0].i+curr_block.nlp_global.start, temp_span_range[-1].i+curr_block.nlp_global.start+1
             
         new_span_ranges.sort()
         new_span_ranges = merge_overlapping_spans(new_span_ranges)
         self.phrases = [self.doc_spacy[span_range[0]:span_range[1]] for span_range in new_span_ranges]
-        if self.chunks:
-            self.pid2chunk_ids = {pid: set(self.tid2chunk_id[phrase.start:phrase.end]) for pid, phrase in enumerate(self.phrases)}
         self.tid2phrase_id = get_tid2phrase_id(new_span_ranges)
                     
     def build_dkg(self):
         dkg = nx.MultiDiGraph()
+        nx.MultiGraph
         
         for block in self.blocks:
             block.prons = []
@@ -735,15 +746,15 @@ class DocManager:
                 for clause_id in range(prev_clause_num, len(dep_trees)):
                     dep_tree = dep_trees[clause_id]
                     # Find the noun phrases
-                    noun_phrases = list[Span]()
+                    local_noun_phrases = list[Span]()
                     phrase_ids = {self.tid2phrase_id[block.nlp_global.start + node] for node in dep_tree.nodes}
                     for phrase_id in phrase_ids:
                         if phrase_id >= 0:
                             noun_phrase = self.phrases[phrase_id]
-                            noun_phrases.append(block.nlp_local[noun_phrase.start-block.nlp_global.start: noun_phrase.end-block.nlp_global.start])
+                            local_noun_phrases.append(block.nlp_local[noun_phrase.start-block.nlp_global.start: noun_phrase.end-block.nlp_global.start])
                     
-                    for np_label, noun_phrase in [('np', np) for np in noun_phrases] + [('p', pron) for pron in block.prons if dep_tree.has_node(pron.root.i)]:
-                        root_phrase = noun_phrase
+                    for np_label, local_noun_phrase in [('np', np) for np in local_noun_phrases] + [('p', pron) for pron in block.prons if dep_tree.has_node(pron.root.i)]:
+                        root_phrase = local_noun_phrase
 
                         while root_phrase.root.dep_ in {'conj', 'appos'}:
                             root_phrase_id:int = self.tid2phrase_id[block.nlp_global.start + root_phrase.root.head.i]
@@ -758,10 +769,10 @@ class DocManager:
                         
                         global_phrase_ids = []
                         if np_label == 'np':
-                            global_phrase_ids.append(self.tid2phrase_id[block.nlp_global.start + noun_phrase.root.i])
+                            global_phrase_ids.append(self.tid2phrase_id[block.nlp_global.start + local_noun_phrase.root.i])
                         else:
-                            if noun_phrase.root.i in block.pron_root2coref:
-                                coref = block.pron_root2coref[noun_phrase.root.i]
+                            if local_noun_phrase.root.i in block.pron_root2coref:
+                                coref = block.pron_root2coref[local_noun_phrase.root.i]
                                 coref_phrase_id = self.tid2phrase_id[block.nlp_global.start + coref.root.i]
                                 if coref_phrase_id >= 0:
                                     global_phrase_ids.append(coref_phrase_id)
@@ -966,7 +977,7 @@ class DocManager:
             phrase_id2seen_tids: dict[int, set[int]] = defaultdict(set)
             for shared_text, phrases in sorted(temp_shared_text2phrases.items(), key=lambda k: len(k[0]), reverse=True):
                 for phrase_id_1 in sorted(phrases):
-                    if self.phrases[phrase_id_0].sent.start != self.phrases[phrase_id_1].sent.start:
+                    if self.tid2sent_id[self.phrases[phrase_id_0].start] != self.tid2sent_id[self.phrases[phrase_id_1].start]:
                         for tids_1 in phrase_id2shared_text2tids[phrase_id_1][shared_text]:
                             if not phrase_id2seen_tids[phrase_id_1].intersection(tids_1):
                                 phrase_id2seen_tids[phrase_id_1].update(tids_1)
@@ -998,7 +1009,7 @@ class DocManager:
             if not dkg.has_edge(phrase_id_0, phrase_id_1, SHARED_TEXT):
                 similarity = min(cosine_sim[phrase_id_0][phrase_id_1], 1.0)
                 weight = (abs(self.tid2sent_id[self.phrases[phrase_id_1].root.i] - self.tid2sent_id[self.phrases[phrase_id_0].root.i]) + 1) * (1 - similarity)
-                if (weight <= 2 and similarity > 0.2) or similarity > 0.5:
+                if (weight <= 2 and similarity > 0.2) or similarity > 0.5 or len(shared_text) > 1:
                     dkg.add_edge(phrase_id_0, phrase_id_1, SHARED_TEXT, weight=weight, similarity=similarity)
 
         self.dkg = dkg
@@ -1322,41 +1333,40 @@ class DocManager:
         if self.tid2block_id[span.start] >= 0 and self.tid2block_id[span.end-1] >= 0 and self.tid2block_id[span.start] == self.tid2block_id[span.end-1]:
             return self.blocks[self.tid2block_id[span.start]]
         
-    def plot_dkg(self):
+    def plot_dkg(self, host:str='128.174.136.27', port:int=8051):
         y_start = 0
         width = 80
         nodes = []
         for block in self.blocks:
-            if block.nlp_local:
-                # start_idx = 0
-                for sent in block.nlp_local.sents:
-                    start_idx = sent[0].idx
-                    last_chunk_tid = sent.start + block.nlp_global.start
-                    last_chunk_id = self.tid2phrase_id[last_chunk_tid]
-                    curr_chunk_tid = last_chunk_tid
-                    curr_chunk_id = last_chunk_id
-                    for token in sent[1:]:
-                        curr_chunk_tid = token.i + block.nlp_global.start
-                        curr_chunk_id = self.tid2phrase_id[curr_chunk_tid]
-                        if curr_chunk_id != last_chunk_id:
-                            dist2start = self.doc_spacy[last_chunk_tid].idx - block.nlp_global[0].idx - start_idx
-                            if dist2start > width:
-                                y_start += 20
-                                start_idx = self.doc_spacy[last_chunk_tid].idx - block.nlp_global[0].idx
-                                dist2start = 0
-                            nodes.append({'data': {'id': last_chunk_tid, 'label': self.doc_spacy[last_chunk_tid:curr_chunk_tid].text}, 'position': {'x': dist2start * 6.1, 'y': y_start}, 'classes': 'noun_phrase' if last_chunk_id >= 0 else 'text', 'locked': True})
-                            last_chunk_tid = curr_chunk_tid
-                            last_chunk_id = curr_chunk_id
-                    dist2start = self.doc_spacy[last_chunk_tid].idx - block.nlp_global[0].idx - start_idx
-                    if dist2start > width:
-                        y_start += 20
-                        start_idx = self.doc_spacy[last_chunk_tid].idx - block.nlp_global[0].idx
-                        dist2start = 0
-                    nodes.append({'data': {'id': last_chunk_tid, 'label': self.doc_spacy[last_chunk_tid:sent.end+block.nlp_global.start].text}, 'position': {'x': dist2start * 6.1, 'y': y_start}, 'classes': 'noun_phrase' if last_chunk_id >= 0 else 'text', 'locked': True})
-                    y_start += 50
-                y_start += 100
+            # start_idx = 0
+            for sent in block.nlp_local.sents:
+                start_idx = sent[0].idx
+                last_chunk_tid = sent.start + block.nlp_global.start
+                last_chunk_id = self.tid2phrase_id[last_chunk_tid]
+                curr_chunk_tid = last_chunk_tid
+                curr_chunk_id = last_chunk_id
+                for token in sent[1:]:
+                    curr_chunk_tid = token.i + block.nlp_global.start
+                    curr_chunk_id = self.tid2phrase_id[curr_chunk_tid]
+                    if curr_chunk_id != last_chunk_id:
+                        dist2start = self.doc_spacy[last_chunk_tid].idx - block.nlp_global[0].idx - start_idx
+                        if dist2start > width:
+                            y_start += 20
+                            start_idx = self.doc_spacy[last_chunk_tid].idx - block.nlp_global[0].idx
+                            dist2start = 0
+                        nodes.append({'data': {'id': last_chunk_tid, 'label': self.doc_spacy[last_chunk_tid:curr_chunk_tid].text}, 'position': {'x': dist2start * 6.1, 'y': y_start}, 'classes': 'noun_phrase' if last_chunk_id >= 0 else 'text', 'locked': True})
+                        last_chunk_tid = curr_chunk_tid
+                        last_chunk_id = curr_chunk_id
+                dist2start = self.doc_spacy[last_chunk_tid].idx - block.nlp_global[0].idx - start_idx
+                if dist2start > width:
+                    y_start += 20
+                    start_idx = self.doc_spacy[last_chunk_tid].idx - block.nlp_global[0].idx
+                    dist2start = 0
+                nodes.append({'data': {'id': last_chunk_tid, 'label': self.doc_spacy[last_chunk_tid:sent.end+block.nlp_global.start].text}, 'position': {'x': dist2start * 6.1, 'y': y_start}, 'classes': 'noun_phrase' if last_chunk_id >= 0 else 'text', 'locked': True})
+                y_start += 50
+            y_start += 100
                 
-        edges = [{'data': {'source': self.phrases[u].start, 'target': self.phrases[v].start, 'type': edge_type, 'similarity': similarity * 0.5}} for u, v, edge_type, similarity in self.dkg.edges(data='similarity', keys=True)]
+        edges = [{'data': {'source': self.phrases[u].start, 'target': self.phrases[v].start, 'type': edge_type, 'similarity': (similarity if similarity else 0) * 0.5}} for u, v, edge_type, similarity in self.dkg.edges(data='similarity', keys=True)]
 
         app = dash.Dash(__name__)
         app.layout = html.Div([
@@ -1445,4 +1455,4 @@ class DocManager:
             )
         ])
 
-        app.run_server(jupyter_mode="external", port=8051, host='128.174.136.27')
+        app.run_server(jupyter_mode="external", port=port, host=host)

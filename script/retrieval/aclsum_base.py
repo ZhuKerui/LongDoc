@@ -69,7 +69,7 @@ if __name__ == '__main__':
             words_alpha = set(f.read().splitlines())
         doc_manager = DocManager(word_vocab=words_alpha)
 
-        aclsum_dataset = list[dict]()
+        aclsum_dataset = list[Sample]()
         pdf_path = pdf_dir(ACLSUM_DIR)
         if not os.path.exists(pdf_path):
             os.makedirs(pdf_path)
@@ -139,8 +139,7 @@ if __name__ == '__main__':
                 relevant_blocks=relevant_blocks,
                 answers=answers,
                 extractions=extractions
-            ).model_dump())
+            ))
             
-        with jsonlines.open(f'{ACLSUM_DIR}/{split}_dataset.jsonl', 'w') as f_out:
-            f_out.write_all(aclsum_dataset)
+        save_dataset_to_jsonl(aclsum_dataset, f'{ACLSUM_DIR}/{split}_dataset.jsonl')
             

@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from bs4 import Tag, BeautifulSoup
 import requests
 import urllib.request as libreq
+import jsonlines
 import feedparser
 import evaluate
 import re
@@ -193,9 +194,22 @@ class Sample(BaseModel):
     generated_extractions: dict[str, list[tuple[str, list[int]]]] = {} # question -> [(extraction, [block_id])]
     generated_answers: dict[str, str] = {} # question -> answer
     
+    # Evaluation info
+    selected_blocks_eval: dict[str, dict[str, float]] = {} # question -> {metric -> score}
+    generated_extractions_eval: dict[str, dict[str, float]] = {} # question -> {metric -> score}
+    generated_answers_eval: dict[str, dict[str, float]] = {} # question -> {metric -> score}
+    
     @property
     def doc_str(self):
         return '\n\n'.join(self.doc_blocks)
+    
+def load_dataset_from_jsonl(file_path:str):
+    with jsonlines.open(file_path) as f_in:
+        return [Sample.model_validate(line) for line in f_in]
+
+def save_dataset_to_jsonl(dataset:list[Sample], file_path:str):
+    with jsonlines.open(file_path, 'w') as f_out:
+        f_out.write_all([sample.model_dump() for sample in dataset])
     
 def get_chunk_index(chunks:list[str]):
     ngram2chunks: dict[tuple, list[tuple[int, str]]] = defaultdict(list)
